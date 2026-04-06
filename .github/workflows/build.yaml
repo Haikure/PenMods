@@ -1,0 +1,145 @@
+name: Build PenMods
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      build_platform:
+        description: '目标平台 (e.g. YDP02X)'
+        required: true
+        default: 'YDP02X'
+      target_channel:
+        description: '目标渠道'
+        required: true
+        default: 'dev'
+      build_mode:
+        description: '编译模式'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+
+env:
+  GCC_BASE_URL: https://github.com/Redbeanw44602/aarch64-linux-gnu-gcc-6.5.0/releases/download/6.5.0
+  QT_DIR: ${{ github.workspace }}/qt-aarch64
+  XMAKE_CACHE_DIR: ~/.xmake/cache
+  XMAKE_PACKAGES_DIR: ~/.xmake/packages
+  XMAKE_ROOT: y
+  BUILD_PLATFORM: ${{ github.event.inputs.build_platform || 'YDP02X' }}
+  TARGET_CHANNEL: ${{ github.event.inputs.target_channel || 'dev' }}
+  BUILD_MODE: ${{ github.event.inputs.build_mode || 'release' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: 更新系统 & 安装基础依赖
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm \
+            base-devel git zig wget curl \
+            python3 ninja cmake nasm libxcrypt lame opencc qt5-tools qt5-base
+
+      - name: 安装 aarch64-linux-gnu 工具链
+        run: |
+          wget -q "${{ env.GCC_BASE_URL }}/aarch64-linux-gnu-binutils-2.30-1-x86_64.pkg.tar.zst"
+          wget -q "${{ env.GCC_BASE_URL }}/aarch64-linux-gnu-glibc-2.27-1-any.pkg.tar.zst"
+          wget -q "${{ env.GCC_BASE_URL }}/aarch64-linux-gnu-gcc-6.5.0-1-x86_64.pkg.tar.zst"
+          pacman -U --noconfirm \
+            aarch64-linux-gnu-binutils-2.30-1-x86_64.pkg.tar.zst \
+            aarch64-linux-gnu-glibc-2.27-1-any.pkg.tar.zst \
+            aarch64-linux-gnu-gcc-6.5.0-1-x86_64.pkg.tar.zst
+          aarch64-linux-gnu-gcc --version
+
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 缓存 Qt 5.15.2
+        id: cache-qt
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.QT_DIR }}
+          key: qt-aarch64-5.15.2
+
+      - name: 缓存 Xmake 包
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.XMAKE_PACKAGES_DIR }}
+          key: xmake-packages-${{ hashFiles('xmake.lua', 'xmake/**/*.lua') }}
+          restore-keys: |
+            xmake-packages-
+
+      - name: 缓存 Xmake 编译缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.XMAKE_CACHE_DIR }}
+          key: xmake-cache-${{ env.BUILD_PLATFORM }}-${{ env.BUILD_MODE }}-${{ github.sha }}
+          restore-keys: |
+            xmake-cache-${{ env.BUILD_PLATFORM }}-${{ env.BUILD_MODE }}-
+
+      - name: 缓存项目构建中间产物
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/.build_cache
+            build/.deps
+            build/.gens
+            build/.objs
+          key: build-objs-${{ env.BUILD_PLATFORM }}-${{ env.BUILD_MODE }}-${{ github.sha }}
+          restore-keys: |
+            build-objs-${{ env.BUILD_PLATFORM }}-${{ env.BUILD_MODE }}-
+
+      - name: 下载 Qt 5.15.2
+        if: steps.cache-qt.outputs.cache-hit != 'true'
+        run: |
+          wget -q \
+            https://github.com/Redbeanw44602/aarch64-linux-qt-5.15.2/releases/latest/download/aarch64-linux-qt-5.15.2.tar.gz \
+            -O /tmp/qt.tar.gz
+          mkdir -p ${{ env.QT_DIR }}
+          tar -xzf /tmp/qt.tar.gz -C ${{ env.QT_DIR }}
+
+      - name: 构建 fake qmake
+        run: |
+          g++ -fmax-errors=1 \
+            -o "${{ env.QT_DIR }}/bin/qmake" \
+            -D"PREFIX=\"${{ env.QT_DIR }}\"" \
+            "${{ env.QT_DIR }}/bin/qmake.cpp"
+          "${{ env.QT_DIR }}/bin/qmake"
+          ${{ env.QT_DIR }}/bin/moc --version
+
+      - name: 配置 xmake
+        run: |
+          pacman -U --noconfirm binary/xmake-git-3.0.3.r259-1-x86_64.pkg.tar.zst
+          xmake repo -u
+          sed -i \
+            's|format("COMMAND\\n      %s/bin/opencc_dict", path.unix(package:dep("opencc"):installdir()))|"COMMAND\\n      /bin/opencc_dict"|g' \
+            ~/.xmake/repositories/xmake-repo/packages/o/opencc/xmake.lua
+          xmake f \
+            --qt="${{ env.QT_DIR }}" \
+            --arch=arm64-v8a \
+            --build-platform=${{ env.BUILD_PLATFORM }} \
+            --target-channel=${{ env.TARGET_CHANNEL }} \
+            --toolchain=zig \
+            -m ${{ env.BUILD_MODE }} \
+            -y \
+            --cross=aarch64-linux-gnu.2.27
+
+      - name: 编译 PenMods
+        run: xmake build
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PenMods-${{ env.BUILD_PLATFORM }}-${{ github.sha }}
+          path: build/linux/arm64-v8a/
+          retention-days: 7
