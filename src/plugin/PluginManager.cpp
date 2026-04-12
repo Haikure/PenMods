@@ -243,6 +243,9 @@ bool PluginManager::loadSo(PluginInfo& info) {
             }
         }
 
+        // ---- 阶段 3: 初始化 Hook API ----
+        initializePluginHookAPI(info);
+
         // 成功
         QFile::remove(loadingFlagPath);
         m_loadedLibraries.insert(info.id, lib);
@@ -363,6 +366,81 @@ bool PluginManager::uninstallPlugin(QString pluginId) {
 
     spdlog::error("Plugin not found for uninstallation: {}", pluginId.toStdString());
     return false;
+}
+
+// ------------------------------------------------------------------
+// Hook API 实现
+// ------------------------------------------------------------------
+
+// Hook API 实现函数 - 供插件调用
+static void* querySymbolImpl(const char* symbolName) {
+    if (!symbolName) {
+        spdlog::error("[PluginHookAPI] Symbol name is null");
+        return nullptr;
+    }
+    
+    void* addr = SymDB::getInstance().query(symbolName);
+    if (!addr) {
+        spdlog::warn("[PluginHookAPI] Symbol not found: {}", symbolName);
+    } else {
+        spdlog::debug("[PluginHookAPI] Found symbol '{}' at {:#x}", symbolName, reinterpret_cast<uint64_t>(addr));
+    }
+    return addr;
+}
+
+static int hookFunctionImpl(void* targetAddr, void* detourFunc, void** originalFunc) {
+    if (!targetAddr || !detourFunc || !originalFunc) {
+        spdlog::error("[PluginHookAPI] Invalid parameters for hook (target: {}, detour: {}, original: {})",
+                     fmt::ptr(targetAddr), fmt::ptr(detourFunc), fmt::ptr(originalFunc));
+        return -1;
+    }
+    
+    int result = DobbyHook(targetAddr, (dobby_dummy_func_t)detourFunc, (dobby_dummy_func_t*)originalFunc);
+    if (result != 0) {
+        spdlog::error("[PluginHookAPI] Failed to hook at {:#x}", reinterpret_cast<uint64_t>(targetAddr));
+    } else {
+        spdlog::info("[PluginHookAPI] Successfully hooked at {:#x}", reinterpret_cast<uint64_t>(targetAddr));
+    }
+    return result;
+}
+
+// 初始化插件的 Hook API
+void PluginManager::initializePluginHookAPI(const PluginInfo& info) {
+    QLibrary* lib = m_loadedLibraries[info.id];
+    if (!lib || !lib->isLoaded()) {
+        spdlog::warn("Cannot initialize Hook API for {}: library not loaded or null", info.id.toStdString());
+        return;
+    }
+
+    // 查找插件中的 Hook API 初始化函数
+    typedef void (*InitPluginWithHookAPIFunc)(void*);
+    auto initWithHookApi = reinterpret_cast<InitPluginWithHookAPIFunc>(
+        lib->resolve("init_plugin_with_hook_api")
+    );
+    
+    if (initWithHookApi) {
+        spdlog::info("Calling init_plugin_with_hook_api for plugin: {}", info.id.toStdString());
+        
+        // 构造 Hook API 结构体
+        struct PluginHookAPI {
+            void* (*querySymbol)(const char*);
+            int (*hookFunction)(void*, void*, void**);
+        } hookApi = {
+            &querySymbolImpl,
+            &hookFunctionImpl
+        };
+        
+        try {
+            initWithHookApi(&hookApi);
+            spdlog::info("Hook API initialized successfully for plugin: {}", info.id.toStdString());
+        } catch (const std::exception& e) {
+            spdlog::error("Exception in init_plugin_with_hook_api for plugin {}: {}",
+                         info.id.toStdString(), e.what());
+        }
+    } else {
+        spdlog::debug("Plugin {} does not export init_plugin_with_hook_api(), skipped.",
+                     info.id.toStdString());
+    }
 }
 
 } // namespace mod

@@ -44,6 +44,9 @@ private:
 
     // 对已加载但未初始化引擎的插件，补充调用 attach
     void attachEngineToLoadedPlugins();
+    
+    // 初始化插件的 Hook API
+    void initializePluginHookAPI(const PluginInfo& info);
 
     friend class Singleton<PluginManager>;
 };
