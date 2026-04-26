@@ -10,6 +10,8 @@
 
 #include <QQmlContext>
 
+#include <QRegularExpression>
+
 namespace mod {
 
 QueryTweaks::QueryTweaks() {
@@ -60,9 +62,11 @@ PEN_HOOK(
     int     a6,
     bool    a7
 ) {
-    if (mod::QueryTweaks::getInstance().getLowerScan()) {
+    auto &qt = mod::QueryTweaks::getInstance();
+    if (qt.getLowerScan()) {
         what = what.toLower();
     }
+    what.replace(QRegularExpression(QStringLiteral(" {2,}")), QStringLiteral(" "));
     return origin(self, what, a3, a4, a5, a6, a7);
 }
 #endif
