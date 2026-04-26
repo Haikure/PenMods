@@ -22,7 +22,9 @@ protected:
         // #ifdef PL_DEBUG
         set_level(spdlog::level::debug);
         // #endif
-        set_pattern("[%H:%M:%S.%e] [%n] [%l] %v");
+        // %^ 和 %$ 标记颜色范围：stdout_color_sink_mt 内置默认颜色
+        //   trace=白色, debug=青色, info=绿色, warn=黄色, err=红色, critical=红底白字加粗
+        set_pattern("[%H:%M:%S.%e] [%n] [%^%l%$] %^%v%$");
     }
 
 private:

@@ -20,6 +20,9 @@ LoggerMonitor::LoggerMonitor() {
     mNoUploadRawScanImg = mCfg["no_upload_raw_scan_img"];
     mNoUploadHttplog    = mCfg["no_upload_httplog"];
 
+    // 为原生日志拦截器启用彩色输出
+    mReplacer->set_pattern("[%H:%M:%S.%e] [%n] [%^%l%$] %^%v%$");
+
     connect(&Event::getInstance(), &Event::beforeUiInitialization, [this](QQuickView& view, QQmlContext* context) {
         context->setContextProperty("loggerMonitor", this);
     });
