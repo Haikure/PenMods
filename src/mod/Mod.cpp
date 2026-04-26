@@ -62,7 +62,11 @@ void Mod::uninstall() {
     try {
         QFile modLibrary(util::getModuleFileInfo().absoluteFilePath());
         QFile mainProcess(util::getApplicationFileInfo().absoluteFilePath());
-        QFile mainProcessBak(util::getApplicationFileInfo().absolutePath() + "/YoudaoDictPen.original_bak");
+        QString appDir = util::getApplicationFileInfo().absolutePath();
+        QFile mainProcessBak(appDir + "/YoudaoDictPen.original_bak");
+        if (!mainProcessBak.exists()) {
+            mainProcessBak.setFileName(appDir + "/YoudaoDictPen.bak");
+        }
         if (!mainProcessBak.exists()) throw std::runtime_error("无法还原主程序, 因为备份已丢失");
         if (!mainProcess.remove() || !mainProcessBak.rename("YoudaoDictPen"))
             throw std::runtime_error("无法还原主程序");
