@@ -178,7 +178,7 @@ void ChatBot::sendMessage(const QString& message) {
 void ChatBot::makeApiRequest(const QJsonArray& messages) {
     if (m_apiKey.isEmpty()) {
         // debug("API 密钥未设置");
-        emit errorOccurred("API 密钥未设置");
+        emit errorOccurred("API 密钥未设置\n请进入「设置」页面配置有效的 API 密钥后重试");
         return;
     }
 
@@ -371,7 +371,53 @@ void ChatBot::handleNetworkReply(QNetworkReply* reply, bool isStream) {
             emit streamEnd();
         }
 
-        emit errorOccurred("API 请求失败: " + errorString);
+        // 尝试读取 HTTP 状态码
+        int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+        // 尝试读取响应体中的错误信息
+        QByteArray responseBody = reply->readAll();
+        QString detailMsg;
+        if (!responseBody.isEmpty()) {
+            QJsonDocument errDoc = QJsonDocument::fromJson(responseBody);
+            if (errDoc.isObject()) {
+                QJsonObject errObj = errDoc.object();
+                if (errObj.contains("error") && errObj["error"].isObject()) {
+                    QJsonObject errorDetail = errObj["error"].toObject();
+                    if (errorDetail.contains("message"))
+                        detailMsg = errorDetail["message"].toString();
+                }
+            }
+            if (detailMsg.isEmpty())
+                detailMsg = QString::fromUtf8(responseBody).left(200);
+        }
+
+        // 根据错误类型给出建议
+        QString suggestion;
+        if (httpStatus == 401 || httpStatus == 403) {
+            suggestion = "API 密钥无效或已过期，请在设置中检查密钥";
+        } else if (httpStatus == 429) {
+            suggestion = "请求频率过高，请稍后再试";
+        } else if (httpStatus >= 500) {
+            suggestion = "AI 服务端异常，请稍后重试";
+        } else if (reply->error() == QNetworkReply::ConnectionRefusedError ||
+                   reply->error() == QNetworkReply::HostNotFoundError ||
+                   reply->error() == QNetworkReply::TimeoutError) {
+            suggestion = "无法连接到 AI 服务，请检查网络连接";
+        } else {
+            suggestion = errorString;
+        }
+
+        // 构建详细错误信息
+        QString fullError = "API 请求失败";
+        QStringList parts;
+        if (httpStatus > 0)
+            parts << QString("状态码: %1").arg(httpStatus);
+        if (!detailMsg.isEmpty())
+            parts << detailMsg;
+        parts << suggestion;
+        fullError = fullError + "\n" + parts.join("\n");
+
+        emit errorOccurred(fullError);
     }
 
     // 从活动列表中移除已完成的请求
@@ -556,7 +602,7 @@ void ChatBot::saveMessages() {
     QFile file(savePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         error("无法打开文件进行写入: {}", savePath.toStdString());
-        emit errorOccurred("无法保存文件: " + savePath);
+        emit errorOccurred("保存聊天记录失败\n路径: " + savePath + "\n请检查磁盘空间或目录权限");
         return;
     }
 
