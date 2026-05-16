@@ -38,6 +38,12 @@ option('target-channel')
     set_values('dev', 'canary', 'beta', 'stable')
 option_end()
 
+option('force-debug-log')
+    set_default(false)
+    set_showmenu(true)
+    set_description('Enable PL_DEBUG define even in release builds (force debug logging).')
+option_end()
+
 --- global configs
 
 set_license('GPL-3.0-only')
@@ -62,7 +68,7 @@ set_exceptions('cxx')
 set_configdir('$(builddir)/config')
 add_configfiles('src/mod/Version.h.in')
 
-if is_mode('debug') then
+if is_mode('debug') or get_config('force-debug-log') then
     add_defines('PL_DEBUG')
 end
 
