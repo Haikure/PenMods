@@ -7,6 +7,8 @@
 #include "system/input/ScreenManager.h"
 #include "system/input/InputDaemon.h"
 
+#include "filemanager/player/MusicPlayer.h"
+
 #include "base/YEnum.h"
 
 #include "common/Event.h"
@@ -119,9 +121,12 @@ void ScreenManager::rtSetAutoScreenOff(bool val) {
 
 // MusicPlayer
 PEN_HOOK(uint64, _ZN7YGlobal27isInPlayerCenterPageChangedEv, uint64 self, uint64 a2, uint64 a3, uint64 a4, uint64 a5) {
-    mod::ScreenManager ::getInstance().onInPlayerPageChanged(
-        PEN_CALL(bool, "_ZNK7YGlobal20isInPlayerCenterPageEv", uint64)(self)
-    );
+    bool isInPage = PEN_CALL(bool, "_ZNK7YGlobal20isInPlayerCenterPageEv", uint64)(self);
+    mod::ScreenManager ::getInstance().onInPlayerPageChanged(isInPage);
+    // 离开播放器页面时，清理文件管理器创建的临时软链接
+    if (!isInPage) {
+        mod::filemanager::MusicPlayer::getInstance().cleanupTempSymlinks();
+    }
     return origin(self, a2, a3, a4, a5);
 }
 

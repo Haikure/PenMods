@@ -11,6 +11,7 @@
 #include "common/Event.h"
 #include "common/Utils.h"
 
+#include <QFile>
 #include <QQmlContext>
 #include <QRandomGenerator>
 
@@ -87,14 +88,36 @@ void MusicPlayer::_play(const std::shared_ptr<QFileInfo>& file) {
     entity->mColumnId      = PLAYER_FAKE_COLUMN_ID;
     entity->mIsDir         = false;
     entity->mDownloadState = DownloadState::SUCCEED;
-    entity->mLocalFile     = file->absoluteFilePath();
     entity->mTitle         = file->fileName();
-    auto matchName         = file->completeBaseName();
-    for (const auto& i : file->absoluteDir().entryInfoList()) {
-        if (i.suffix().toLower() == "lrc" && i.completeBaseName() == matchName) {
-            entity->mLrcFile = i.absoluteFilePath();
+    // 清理上次的临时软链接
+    cleanupTempSymlinks();
+    QString lrcPath;
+    entity->mLocalFile = createTempSymlinks(file, lrcPath);
+    if (!lrcPath.isEmpty()) {
+        entity->mLrcFile = lrcPath;
+        hasLrc           = true;
+    } else {
+        // 后备：在原目录查找配对的 .lrc 文件（先精确匹配，再模糊匹配）
+        auto       matchName = file->completeBaseName();
+        double     bestScore = 0.0;
+        QString    bestMatch;
+        const auto entries = file->absoluteDir().entryInfoList();
+        for (const auto& i : entries) {
+            if (i.suffix().toLower() != "lrc") continue;
+            if (i.completeBaseName() == matchName) {
+                bestMatch = i.absoluteFilePath();
+                bestScore = 1.0;
+                break;
+            }
+            double score = fuzzyLrcMatch(matchName, i.completeBaseName());
+            if (score > bestScore) {
+                bestScore = score;
+                bestMatch = i.absoluteFilePath();
+            }
+        }
+        if (bestScore >= 0.35 && !bestMatch.isEmpty()) {
+            entity->mLrcFile = bestMatch;
             hasLrc           = true;
-            break;
         }
     }
     PEN_CALL(void*, "_ZN13YMediaManager9playAudioERK18YColumnMediaEntityb", void*, YColumnMediaEntity*, bool)
@@ -107,6 +130,38 @@ void MusicPlayer::_play(const std::shared_ptr<QFileInfo>& file) {
         (YPointer<YMediaPlayerManager>::getInstance());
         PEN_CALL(void, "_ZN19YMediaPlayerManager9setHasLrcEb", void*, bool)
         (YPointer<YMediaPlayerManager>::getInstance(), hasLrc);
+    }
+}
+
+QString MusicPlayer::createTempSymlinks(const PlayFile& file, QString& outLrcPath) {
+    outLrcPath.clear();
+    const QString suffix = file->suffix().toLower();
+    // 如果已经是 .mp3，无需创建软链接，直接返回原路径
+    if (suffix == "mp3") {
+        return file->absoluteFilePath();
+    }
+    // 生成唯一的临时文件名（基于原文件绝对路径的哈希）
+    const QString baseName     = file->completeBaseName();
+    const QString tmpAudioPath = QString("/tmp/%1.mp3").arg(baseName);
+    // 创建音频文件的 .mp3 软链接
+    QFile::remove(tmpAudioPath);
+    if (QFile::link(file->absoluteFilePath(), tmpAudioPath)) {
+        mTempAudioLink = tmpAudioPath;
+        debug("Created temp audio symlink: {} -> {}",
+              tmpAudioPath.toStdString(),
+              file->absoluteFilePath().toStdString());
+    } else {
+        error("Failed to create temp audio symlink: {}", tmpAudioPath.toStdString());
+        return file->absoluteFilePath();
+    }
+    return mTempAudioLink;
+}
+
+void MusicPlayer::cleanupTempSymlinks() {
+    if (!mTempAudioLink.isEmpty()) {
+        QFile::remove(mTempAudioLink);
+        debug("Cleaned up temp audio symlink: {}", mTempAudioLink.toStdString());
+        mTempAudioLink.clear();
     }
 }
 
@@ -173,8 +228,7 @@ void MusicPlayer::onSoundEnd() {
 
 AudioSequence MusicPlayer::getCurrentAudioSequence() {
     return PEN_CALL(AudioSequence, "_ZNK15YSettingManager13audioSequenceEv", void*)(
-        YPointer<YSettingManager>::getInstance()
-    );
+        YPointer<YSettingManager>::getInstance());
 }
 } // namespace mod::filemanager
 
@@ -203,9 +257,14 @@ PEN_HOOK(uint64, _ZN19YMediaPlayerManager13onClickedNextEb, void* self, bool a2)
 
 PEN_HOOK(void*, _ZN19YMediaPlayerManager10onSoundEndEj, void* self, uint32 a2) {
     if (!MusicPlayer::mIsTakeOver) return origin(self, a2);
-    if (*(uint32 *)(*((uint64 *)self + 4) + 100) == a2 // Is current sequence equal?
-            && PEN_CALL(PlayState, "_ZNK19YMediaPlayerManager9playStateEv",
-                void*)(self) == PlayState::PLAYING) // Is in `Playing` state? To prevent unexcept onSoundEnd...
+    if (*(uint32*)(*((uint64*)self + 4) + 100) == a2 // Is current sequence equal?
+        && PEN_CALL(PlayState,
+                    "_ZNK19YMediaPlayerManager9playStateEv",
+                    void*)(self)
+               == PlayState::PLAYING) // Is in `Playing` state? To prevent unexcept onSoundEnd...
         MusicPlayer::getInstance().onSoundEnd();
     return self;
 }
+
+// 系统清理播放数据时，同步清理临时软链接
+PEN_HOOK(void*, _ZN19YMediaPlayerManager8wipeDataEv, void* self) { return origin(self); }

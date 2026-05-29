@@ -104,6 +104,7 @@ QVariant FileManager::data(const QModelIndex& index, int role) const {
         switch (H(ext.toUtf8())) {
         case H("mp3"):
         case H("flac"):
+        case H("m4a"):
             name = "mp3";
             break;
         case H("md"):
@@ -526,25 +527,41 @@ void FileManager::_initCurrentDir() {
         );
     }
 
-    // 6. 处理同名歌词文件隐藏
+    // 6. 处理同名歌词文件隐藏（先精确匹配，再模糊匹配）
     QSet<QString> filesToHide;
     if (getHidePairedLyrics()) {
-        QSet<QString> currentFileNames;
-        currentFileNames.reserve(list.size());
+        // 收集所有 .lrc 文件
+        QVector<QFileInfo> lrcFiles;
         for (const auto& i : list) {
-            currentFileNames.insert(i.fileName());
+            if (i.suffix().toLower() == "lrc")
+                lrcFiles.append(i);
         }
 
+        const QStringList audioExts = {"mp3", "flac", "m4a", "wav", "ogg", "aac"};
         for (const auto& i : list) {
-            if (i.fileName().endsWith(".mp3", Qt::CaseInsensitive)) {
-                QString lrcName = i.fileName();
-                // 简单的后缀替换，需确保长度足够
-                if (lrcName.length() > 4) {
-                    lrcName.replace(lrcName.length() - 4, 4, ".lrc");
-                    if (currentFileNames.contains(lrcName)) {
-                        filesToHide.insert(mCurrentPath.filePath(lrcName));
-                    }
+            const QString ext = i.suffix().toLower();
+            if (!audioExts.contains(ext))
+                continue;
+
+            const QString baseName = i.completeBaseName();
+            double        bestScore  = 0.0;
+            QString       bestMatch;
+
+            for (const auto& lrc : lrcFiles) {
+                const QString lrcBase = lrc.completeBaseName();
+                if (lrcBase == baseName) {
+                    bestScore  = 1.0;
+                    bestMatch  = lrc.absoluteFilePath();
+                    break;
                 }
+                double score = fuzzyLrcMatch(baseName, lrcBase);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMatch = lrc.absoluteFilePath();
+                }
+            }
+            if (bestScore >= 0.35 && !bestMatch.isEmpty()) {
+                filesToHide.insert(bestMatch);
             }
         }
     }
@@ -618,7 +635,8 @@ void FileManager::refreshPlayList() {
     auto& list = MusicPlayer::getInstance().getPlayListRef();
     list.clear();
     forEachLoadedEntities([&](const std::shared_ptr<QFileInfo>& file) {
-        if (file->suffix().toLower() == "mp3") {
+        const QString ext = file->suffix().toLower();
+        if (ext == "mp3" || ext == "flac" || ext == "m4a" || ext == "wav" || ext == "ogg" || ext == "aac") {
             list.emplace_back(file);
         }
     });

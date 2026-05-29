@@ -37,6 +37,9 @@ public:
 
     static bool mIsTakeOver;
 
+    /// 清理当前临时软链接
+    void cleanupTempSymlinks();
+
 private:
     friend Singleton<MusicPlayer>;
     explicit MusicPlayer();
@@ -55,6 +58,13 @@ private:
 
     } mCurrentPlaying;
 
+    /// 为指定文件在 /tmp 创建 .mp3 后缀的临时软链接
+    /// @return 返回 .mp3 软链接路径，若原文件已是 .mp3 则返回原路径
+    QString createTempSymlinks(const PlayFile& file, QString& outLrcPath);
+
     void _play(const PlayFile& file);
+
+    // 临时软链接路径，用于清理
+    QString mTempAudioLink;
 };
 } // namespace mod::filemanager
