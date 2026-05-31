@@ -33,4 +33,7 @@ bool judgeIsLegalFileName(const QString& filename);
 
 QString generateUUID();
 
+/// 模糊匹配歌词文件名：计算两个歌名（不含扩展名）的相似度，返回 0.0 ~ 1.0
+double fuzzyLrcMatch(const QString& songName, const QString& lrcName);
+
 } // namespace mod
