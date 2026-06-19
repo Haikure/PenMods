@@ -43,7 +43,27 @@ Config::Config() : Logger("Config") {
         {"logger", {
             {"no_upload_user_action", true},
             {"no_upload_raw_scan_img", true},
-            {"no_upload_httplog", true}
+            {"no_upload_httplog", true},
+            {"levels", {
+                {"Config", "debug"},
+                {"MusicPlayer", "info"},
+                {"FileManager", "info"},
+                {"TextBook", "info"},
+                {"ChatBot", "info"},
+                {"Hitokoto", "info"},
+                {"RimeWrapper", "info"},
+                {"Rime", "info"},
+                {"AudioDaemon", "info"},
+                {"InputDaemon", "info"},
+                {"AudioRecorder", "info"},
+                {"SymDB", "info"},
+                {"ImageViewer", "info"},
+                {"WebPImageProvider", "info"},
+                {"WebPAnimatedImage", "info"},
+                {"PluginManager", "info"},
+                {"Updater", "info"},
+                {"ASound", "info"}
+            }}
         }},
         {"query", {
             {"lower_scan", false},
@@ -116,6 +136,9 @@ Config::Config() : Logger("Config") {
 
     mDefaults = mData;
     _load();
+
+    // Config 初始化完成，后续 Logger 可以从 Config 读取日志级别
+    Logger::s_configLoaded = true;
 }
 
 json Config::read(const std::string& name) {
