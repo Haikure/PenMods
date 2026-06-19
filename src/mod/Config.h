@@ -25,6 +25,7 @@ private:
     explicit Config();
 
     json mData;
+    json mDefaults;
 
     bool _save();
 
@@ -32,7 +33,7 @@ private:
 
     bool _update(json&);
 
-    void _clean_and_merge(json& defaults, const json& loaded);
+    bool _fill_missing_defaults(json& target, const json& defaults);
 };
 
 } // namespace mod
