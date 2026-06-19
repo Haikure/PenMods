@@ -9,7 +9,7 @@
 namespace mod {
 
 struct PageIndex {
-    enum Enum { _ModPage = 100, AudioRecorder, VideoPlayer, ExternalPlayer, ChatAssistant, PluginManager };
+    enum Enum { _ModPage = 100, AudioRecorder, VideoPlayer, ExternalPlayer, ChatAssistant, PluginManager, WallpaperSetting };
     Q_ENUM(Enum)
     Q_GADGET
 };

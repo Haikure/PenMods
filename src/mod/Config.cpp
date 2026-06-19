@@ -92,6 +92,13 @@ Config::Config() : Logger("Config") {
             {"hide_paired_lyrics", false},
             {"show_hidden_files", false}
         }},
+        {"wallpaper", {
+            {"mode", 0},
+            {"custom_image_path", ""},
+            {"wallpaper_folder", ""},
+            {"cycle_interval", 300},
+            {"last_wallpaper", ""}
+        }},
         {"ai", {
             {"speech_assistant", false},
             {"chatbot", {

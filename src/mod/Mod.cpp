@@ -6,6 +6,8 @@
 
 #include "mod/Mod.h"
 
+#include "wallpaper/WallpaperManager.h"
+
 #include "base/YPointer.h"
 
 #include "common/Event.h"
@@ -35,6 +37,9 @@ Mod::Mod() {
             "PageIndex",
             "Not creatable as it is an enum type."
         );
+        
+        // 将 WallpaperManager 注册到 QML 上下文
+        context->setContextProperty("wallpaperManager", &WallpaperManager::getInstance());
         
         // 发射属性变更信号，确保 QML 能正确获取初始值
         emit versionChanged();
@@ -255,6 +260,9 @@ __attribute__((constructor)) static void BeforeMain() {
 
     // plugin
     INSTANCE(PluginManager)
+    
+    // wallpaper
+    INSTANCE(WallpaperManager)
 
 #undef INSTANCE
 }
