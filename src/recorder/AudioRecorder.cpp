@@ -12,6 +12,7 @@
 #include "common/Utils.h"
 
 #include "system/input/InputDaemon.h"
+#include "system/sound/AudioDaemon.h"
 
 #include "Version.h"
 
@@ -86,7 +87,8 @@ bool AudioRecorder::start() {
     format.setByteOrder(QAudioFormat::LittleEndian);
     format.setCodec("audio/pcm");
 
-    // Init input device.
+    // Init input device — 录音期间阻止音频输出自动关闭
+    AudioDaemon::getInstance().acquire(AudioSource::SYSTEM);
     PEN_CALL(void*, "_ZN12YSoundCenter9forceStopEv", void*)(YPointer<YSoundCenter>::getInstance());
     exec("amixer cset numid=2 1");
     auto info = QAudioDeviceInfo::defaultInputDevice();
@@ -151,6 +153,9 @@ bool AudioRecorder::stop() {
     auto error = mInputAudio->error();
 
     disconnect(this, nullptr, nullptr, nullptr);
+
+    // 录音结束，释放音频输出引用
+    AudioDaemon::getInstance().release(AudioSource::SYSTEM);
 
     // Reset audio device.
     exec("amixer cset numid=2 0");

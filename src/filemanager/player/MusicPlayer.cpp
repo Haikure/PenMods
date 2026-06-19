@@ -11,6 +11,8 @@
 #include "common/Event.h"
 #include "common/Utils.h"
 
+#include "system/sound/AudioDaemon.h"
+
 #include <QFile>
 #include <QQmlContext>
 #include <QRandomGenerator>
@@ -73,6 +75,8 @@ void MusicPlayer::play(size_t idx) {
 
 void MusicPlayer::_play(const std::shared_ptr<QFileInfo>& file) {
     mIsTakeOver = true;
+    // 通知音频守护进程：音乐播放器正在使用音频输出
+    mod::AudioDaemon::getInstance().acquire(AudioSource::MUSIC);
     PEN_CALL(void, "_ZN19YMediaPlayerManager8wipeDataEv", void*)(YPointer<YMediaPlayerManager>::getInstance());
     PEN_CALL(bool, "_ZN7YGlobal23setAudioPlayingColomnIdERK7QString", void*, QString const&)
     (YPointer<YGlobal>::getInstance(), "myimport");
@@ -218,6 +222,8 @@ void MusicPlayer::onSoundEnd() {
         play(mCurrentPlaying.mIndex);
         break;
     case AudioSequence::SINGLE_SHOT:
+        // SINGLE_SHOT 播放完毕后，释放音频输出引用
+        mod::AudioDaemon::getInstance().release(AudioSource::MUSIC);
         auto state                                                                     = PlayState::STOPPED;
         *(uint32*)(*((uint64*)YPointer<YMediaPlayerManager>::getInstance() + 4) + 100) = 0;
         PEN_CALL(void*, "_ZN19YMediaPlayerManager12setPlayStateERKN12YEnumWrapper10Play_StateE", void*, void*)
