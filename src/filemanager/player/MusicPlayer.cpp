@@ -75,6 +75,10 @@ void MusicPlayer::play(size_t idx) {
 
 void MusicPlayer::_play(const std::shared_ptr<QFileInfo>& file) {
     mIsTakeOver = true;
+    // 播放新曲目前先释放之前的引用，防止 refCount 无限累积
+    if (mod::AudioDaemon::getInstance().refCount() > 0) {
+        mod::AudioDaemon::getInstance().release(AudioSource::MUSIC);
+    }
     // 通知音频守护进程：音乐播放器正在使用音频输出
     mod::AudioDaemon::getInstance().acquire(AudioSource::MUSIC);
     PEN_CALL(void, "_ZN19YMediaPlayerManager8wipeDataEv", void*)(YPointer<YMediaPlayerManager>::getInstance());
@@ -222,8 +226,6 @@ void MusicPlayer::onSoundEnd() {
         play(mCurrentPlaying.mIndex);
         break;
     case AudioSequence::SINGLE_SHOT:
-        // SINGLE_SHOT 播放完毕后，释放音频输出引用
-        mod::AudioDaemon::getInstance().release(AudioSource::MUSIC);
         auto state                                                                     = PlayState::STOPPED;
         *(uint32*)(*((uint64*)YPointer<YMediaPlayerManager>::getInstance() + 4) + 100) = 0;
         PEN_CALL(void*, "_ZN19YMediaPlayerManager12setPlayStateERKN12YEnumWrapper10Play_StateE", void*, void*)
@@ -236,6 +238,14 @@ AudioSequence MusicPlayer::getCurrentAudioSequence() {
     return PEN_CALL(AudioSequence, "_ZNK15YSettingManager13audioSequenceEv", void*)(
         YPointer<YSettingManager>::getInstance());
 }
+
+void MusicPlayer::releaseAudio() {
+    info("QML 请求释放 MUSIC 引用");
+    while (mod::AudioDaemon::getInstance().refCount() > 0) {
+        mod::AudioDaemon::getInstance().release(AudioSource::MUSIC);
+    }
+}
+
 } // namespace mod::filemanager
 
 // Hooks

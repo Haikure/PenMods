@@ -11,54 +11,110 @@
 #include "common/Event.h"
 #include "common/Utils.h"
 
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+
+#include <signal.h>
+#include <unistd.h>
+#include <sys/inotify.h>
+#include <sys/ioctl.h>
+
 namespace mod {
 
+static const char* sourceToString(AudioSource source) {
+    switch (source) {
+    case AudioSource::TTS:       return "TTS";
+    case AudioSource::MUSIC:     return "MUSIC";
+    case AudioSource::FILE_PLAY: return "FILE_PLAY";
+    case AudioSource::SYSTEM:    return "SYSTEM";
+    }
+    return "UNKNOWN";
+}
+
 AudioDaemon::AudioDaemon() : Logger("AudioDaemon") {
+    info("AudioDaemon 正在初始化...");
+
     // 延迟关闭定时器（单次触发）
     mCloseDelayTimer = new QTimer(this);
     mCloseDelayTimer->setSingleShot(true);
     connect(mCloseDelayTimer, &QTimer::timeout, this, &AudioDaemon::_onCloseTimeout);
 
-    // 状态轮询定时器（持续触发）
-    mPollTimer = new QTimer(this);
-    connect(mPollTimer, &QTimer::timeout, this, &AudioDaemon::_onPollTick);
+    // 状态重评估定时器（每 15 秒触发一次）
+    // 用于检测外部进程死后未触发 inotify 事件的孤儿锁场景
+    mCleanupTimer = new QTimer(this);
+    connect(mCleanupTimer, &QTimer::timeout, this, &AudioDaemon::_onCleanupTick);
 
     // 读取配置（如果存在）
     json cfg = Config::getInstance().read("AudioDaemon");
     if (cfg.contains("enabled"))        mEnabled      = cfg["enabled"].get<bool>();
     if (cfg.contains("closeDelayMs"))   mCloseDelayMs = cfg["closeDelayMs"].get<int>();
+    if (cfg.contains("wakelock_dir"))   mWakeLockDir  = QString::fromStdString(cfg["wakelock_dir"].get<std::string>());
 
     // 连接 UI 初始化完成事件
     connect(&Event::getInstance(), &Event::uiCompleted, this, [this]() {
-        debug("AudioDaemon 就绪。closeDelayMs={}, refCount={}", mCloseDelayMs, mRefCount);
+        // 确保锁目录存在
+        QDir().mkpath(mWakeLockDir);
+        // 初始化 inotify 监控锁目录
+        _initInotify();
+        // 启动状态重评估定时器
+        mCleanupTimer->start(15000);
+        info("AudioDaemon 就绪。closeDelayMs={}, wakelock_dir={}", mCloseDelayMs, mWakeLockDir.toStdString());
     });
 }
 
+// ========== 引用计数接口 ==========
+
 int AudioDaemon::acquire(AudioSource source) {
     if (!mEnabled) {
-        debug("acquire({}) 忽略（daemon 未启用）", static_cast<int>(source));
+        info("acquire({}) 忽略（daemon 未启用）", sourceToString(source));
         return mRefCount;
     }
 
+    bool needsOpen = (mRefCount == 0 && mState == AudioDaemonState::IDLE);
+
+    // 创建文件唤醒锁
+    QDir().mkpath(mWakeLockDir);
+    QString lockFile = _lockFilePath(source);
+    {
+        QFile f(lockFile);
+        f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        f.write(QByteArray::number(static_cast<long long>(getpid())));
+        f.close();
+    }
+
     mRefCount++;
-    debug("acquire({}) → refCount={}", static_cast<int>(source), mRefCount);
+    info("acquire({}) → refCount={}, lockFile={}", sourceToString(source), mRefCount, lockFile.toStdString());
     emit refCountChanged(mRefCount);
+
+    // 如果音频输出当前处于关闭状态（IDLE），主动打开
+    if (needsOpen) {
+        info("acquire: 引用计数从 0 增加，主动打开音频输出");
+        auto result = PEN_CALL(uint64, "_ZN12YSoundCenter15openAudioOutputEv", void*)(YPointer<YSoundCenter>::getInstance());
+        notifyOpenDone();
+        info("acquire: openAudioOutput 主动打开完成, ret={}", result);
+    }
+
     return mRefCount;
 }
 
 int AudioDaemon::release(AudioSource source) {
     if (!mEnabled) {
-        debug("release({}) 忽略（daemon 未启用）", static_cast<int>(source));
+        info("release({}) 忽略（daemon 未启用）", sourceToString(source));
         return mRefCount;
     }
 
     if (mRefCount <= 0) {
-        warn("release({}) 调用时 refCount 已为 0！", static_cast<int>(source));
+        warn("release({}) 调用时 refCount 已为 0！", sourceToString(source));
         return 0;
     }
 
+    // 删除文件唤醒锁
+    QString lockFile = _lockFilePath(source);
+    QFile::remove(lockFile);
+
     mRefCount--;
-    debug("release({}) → refCount={}", static_cast<int>(source), mRefCount);
+    info("release({}) → refCount={}, lockFile removed", sourceToString(source), mRefCount);
     emit refCountChanged(mRefCount);
     return mRefCount;
 }
@@ -76,13 +132,13 @@ bool AudioDaemon::shouldOpenAudioOutput() {
 
     case AudioDaemonState::PLAYING:
         // 已经在播放中，无需重复打开
-        debug("抑制 openAudioOutput（已在 PLAYING 状态）");
+        info("抑制 openAudioOutput（已在 PLAYING 状态）");
         return false;
 
     case AudioDaemonState::CLOSE_DELAY:
         // 正在等待关闭，取消延迟定时器，回到 PLAYING
         mCloseDelayTimer->stop();
-        debug("取消延迟关闭，恢复为 PLAYING");
+        info("取消延迟关闭，恢复为 PLAYING");
         _transitionTo(AudioDaemonState::PLAYING);
         return false;  // 音频设备应该还开着，无需再 open
     }
@@ -91,7 +147,7 @@ bool AudioDaemon::shouldOpenAudioOutput() {
 
 void AudioDaemon::notifyOpenDone() {
     mTotalOpenCalls++;
-    debug("openAudioOutput 完成（累计={}）", mTotalOpenCalls);
+    info("openAudioOutput 完成（累计={}）", mTotalOpenCalls);
     // 确保状态正确
     if (mState != AudioDaemonState::PLAYING) {
         _transitionTo(AudioDaemonState::PLAYING);
@@ -104,31 +160,25 @@ bool AudioDaemon::shouldCloseAudioOutput() {
     // 检查是否有待处理的强制关闭请求（延迟超时后需要真正关闭）
     if (mPendingForceClose) {
         mPendingForceClose = false;
-        debug("强制执行 closeAudioOutput（延迟关闭超时后放行）");
+        info("强制执行 closeAudioOutput（延迟关闭超时后放行）");
         return true;
-    }
-
-    // 如果 ALSA 设备仍有外部程序在播放，不关闭输出
-    if (mAlsaActive) {
-        debug("抑制 closeAudioOutput（ALSA 设备仍活跃→外部程序正在播放）");
-        return false;
     }
 
     switch (mState) {
     case AudioDaemonState::IDLE:
         // 已经是空闲，无需关闭
-        debug("抑制 closeAudioOutput（已在 IDLE 状态）");
+        info("抑制 closeAudioOutput（已在 IDLE 状态）");
         return false;
 
     case AudioDaemonState::PLAYING:
-        // 判断引用计数是否为 0
-        if (mRefCount == 0) {
-            // 引用计数为 0，进入延迟关闭
+        // 判断是否有任何唤醒锁（refCount + 文件锁）
+        if (mRefCount == 0 && _countWakeLocks() == 0) {
+            // 没有任何引用，进入延迟关闭
             _transitionTo(AudioDaemonState::CLOSE_DELAY);
             return false;
         }
-        // 还有引用占用，无需关闭
-        debug("抑制 closeAudioOutput（refCount={} > 0）", mRefCount);
+        // 还有引用或外部锁占用，无需关闭
+        info("抑制 closeAudioOutput（refCount={}, fileLocks={}）", mRefCount, _countWakeLocks());
         return false;
 
     case AudioDaemonState::CLOSE_DELAY:
@@ -140,7 +190,7 @@ bool AudioDaemon::shouldCloseAudioOutput() {
 
 void AudioDaemon::notifyCloseDone() {
     mTotalCloseCalls++;
-    debug("closeAudioOutput 完成（累计={}）", mTotalCloseCalls);
+    info("closeAudioOutput 完成（累计={}）", mTotalCloseCalls);
     _transitionTo(AudioDaemonState::IDLE);
 }
 
@@ -149,7 +199,7 @@ void AudioDaemon::notifyCloseDone() {
 void AudioDaemon::_transitionTo(AudioDaemonState newState) {
     if (mState == newState) return;
 
-    debug("状态: {} → {}",
+    info("状态: {} → {}",
           static_cast<int>(mState),
           static_cast<int>(newState));
     mState = newState;
@@ -157,14 +207,10 @@ void AudioDaemon::_transitionTo(AudioDaemonState newState) {
 
     switch (newState) {
     case AudioDaemonState::IDLE:
-        mPollTimer->stop();
         mCloseDelayTimer->stop();
         break;
 
     case AudioDaemonState::PLAYING:
-        if (!mPollTimer->isActive()) {
-            mPollTimer->start(mPollIntervalMs);
-        }
         break;
 
     case AudioDaemonState::CLOSE_DELAY:
@@ -173,80 +219,177 @@ void AudioDaemon::_transitionTo(AudioDaemonState newState) {
     }
 }
 
-// ========== 定时器回调 ==========
+// ========== 文件唤醒锁操作 ==========
 
-void AudioDaemon::_onCloseTimeout() {
-    debug("延迟关闭超时已到期（refCount={}），设置 mPendingForceClose 等待系统 close 调用", mRefCount);
-    // 无法直接调用 origin，因此设置 mPendingForceClose 标志
-    // 当系统下一次调用 closeAudioOutput 时，shouldCloseAudioOutput 会返回 true
-    mPendingForceClose = true;
-    // 切换到 IDLE，以便系统正常执行 close
-    _transitionTo(AudioDaemonState::IDLE);
+QString AudioDaemon::_lockFilePath(AudioSource source) const {
+    return QString("%1/%2.lock").arg(mWakeLockDir, sourceToString(source));
 }
 
-void AudioDaemon::_onPollTick() {
-    // 检查 ALSA 设备状态（检测外部程序的音频播放）
-    bool nowActive = _checkAlsaPcmStatus();
+int AudioDaemon::_countWakeLocks() {
+    QDir dir(mWakeLockDir);
+    if (!dir.exists()) return 0;
 
-    if (nowActive && !mAlsaActive) {
-        // 外部程序开始播放，标记 ALSA 活跃
-        mAlsaActive = true;
-        debug("ALSA 设备检测到音频流 → 外部程序正在播放，保持输出打开");
+    QStringList filters;
+    filters << "*.lock";
+    auto entries = dir.entryInfoList(filters, QDir::Files, QDir::Name);
+    int  count   = 0;
 
-        // 如果当前不在 PLAYING 状态，需要确保输出打开
+    for (const auto& entry : entries) {
+        // 读取锁文件中的 PID，检查进程是否存活
+        QFile f(entry.absoluteFilePath());
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        QByteArray pidData = f.readAll().trimmed();
+        f.close();
+
+        bool  ok   = false;
+        pid_t pid  = pidData.toInt(&ok);
+        if (ok && kill(pid, 0) == 0) {
+            // 进程存活，这是一个有效的锁
+            count++;
+        } else {
+            if (pidData.isEmpty()) {
+                // 没有 PID 数据，可能文件刚创建，视为有效锁
+                count++;
+            } else {
+                // 有 PID 但进程已死 → 孤儿锁，顺手删除
+                info("清理孤儿锁文件: {} (pid={} 已死)", entry.absoluteFilePath().toStdString(), pid);
+                QFile::remove(entry.absoluteFilePath());
+            }
+        }
+    }
+    return count;
+}
+
+void AudioDaemon::_initInotify() {
+    mInotifyFd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+    if (mInotifyFd < 0) {
+        error("inotify_init1 失败: {}", strerror(errno));
+        return;
+    }
+
+    mInotifyWd = inotify_add_watch(mInotifyFd,
+                                    mWakeLockDir.toStdString().c_str(),
+                                    IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVED_FROM | IN_MOVED_TO);
+
+    if (mInotifyWd < 0) {
+        error("inotify_add_watch 失败: {}", strerror(errno));
+        close(mInotifyFd);
+        mInotifyFd = -1;
+        return;
+    }
+
+    // 通过 QSocketNotifier 将 inotify fd 集成到 Qt 事件循环
+    mInotifyNotifier = new QSocketNotifier(mInotifyFd, QSocketNotifier::Read, this);
+    connect(mInotifyNotifier, &QSocketNotifier::activated, this, &AudioDaemon::_onInotifyReady);
+}
+
+void AudioDaemon::_onInotifyReady(int fd) {
+    Q_UNUSED(fd);
+
+    if (mInotifyFd < 0) {
+        return;
+    }
+
+    // 使用固定大小缓冲区循环读取（避免 VLA 栈溢出）
+    // sizeof(struct inotify_event) + NAME_MAX + 1 是单个事件的最大尺寸
+    // 乘以 64 足够一次性处理任意批量事件
+    union {
+        char     raw[64 * (sizeof(struct inotify_event) + NAME_MAX + 1)];
+        uint64_t align;
+    } buf;
+    constexpr size_t kBufSize = sizeof(buf.raw);
+
+    auto n = read(mInotifyFd, buf.raw, kBufSize);
+    if (n > 0) {
+        // 扫描事件，检查是否有 IN_DELETE_SELF（监控目录被删）
+        bool dirDeleted = false;
+        size_t offset = 0;
+        while (offset < static_cast<size_t>(n)) {
+            auto* event = reinterpret_cast<struct inotify_event*>(buf.raw + offset);
+            if (event->mask & IN_DELETE_SELF) {
+                dirDeleted = true;
+            }
+            offset += sizeof(struct inotify_event) + event->len;
+        }
+
+        if (dirDeleted) {
+            // 监控目录被删，重新创建并添加 watch
+            info("inotify 监控目录被删除，重新创建并添加 watch");
+            QDir().mkpath(mWakeLockDir);
+            if (mInotifyWd >= 0) {
+                inotify_rm_watch(mInotifyFd, mInotifyWd);
+            }
+            mInotifyWd = inotify_add_watch(mInotifyFd,
+                                            mWakeLockDir.toStdString().c_str(),
+                                            IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVED_FROM | IN_MOVED_TO);
+            if (mInotifyWd < 0) {
+                error("重新添加 inotify watch 失败: {}", strerror(errno));
+            }
+        }
+
+        // 只要有事件就触发状态检查
+        _onWakeLockChange();
+    } else if (n < 0 && errno != EAGAIN) {
+        error("inotify read 错误: {}", strerror(errno));
+        // 严重的 inotify 错误，重建整个 inotify 实例
+        if (mInotifyNotifier) {
+            delete mInotifyNotifier;
+            mInotifyNotifier = nullptr;
+        }
+        if (mInotifyFd >= 0) {
+            close(mInotifyFd);
+            mInotifyFd  = -1;
+            mInotifyWd  = -1;
+        }
+        info("重新初始化 inotify");
+        _initInotify();
+    }
+    // n == 0 或 EAGAIN：无事可做，忽略
+}
+
+void AudioDaemon::_onWakeLockChange() {
+    int fileLocks = _countWakeLocks();
+    info("wake lock 目录变更: fileLocks={}, refCount={}, state={}",
+          fileLocks, mRefCount, static_cast<int>(mState));
+
+    if (fileLocks > 0 || mRefCount > 0) {
+        // 有新的唤醒锁创建（外部进程 touch 了锁文件），需要确保音频输出已打开
         if (mState == AudioDaemonState::IDLE) {
-            // 需要打开音频输出——但这里不能调 origin，只能靠下一次 openAudioOutput detour
-            // 不过我们已经在 IDLE，外部播放器应该已经通过 ALSA 直接播放了
-            // 我们只需要阻止 close 即可
+            info("检测到新的唤醒锁，主动打开音频输出");
+            auto result = PEN_CALL(uint64, "_ZN12YSoundCenter15openAudioOutputEv", void*)(YPointer<YSoundCenter>::getInstance());
+            notifyOpenDone();
+            info("_onWakeLockDirChanged: openAudioOutput 主动打开完成, ret={}", result);
         } else if (mState == AudioDaemonState::CLOSE_DELAY) {
             // 取消延迟关闭，回到 PLAYING
             mCloseDelayTimer->stop();
             _transitionTo(AudioDaemonState::PLAYING);
         }
-    }
-
-    if (!nowActive && mAlsaActive) {
-        // 外部程序停止播放
-        mAlsaActive = false;
-        debug("ALSA 设备进入空闲 → 外部程序已停止");
-        // 如果 refCount 也为 0，进入延迟关闭
-        if (mRefCount == 0 && mState == AudioDaemonState::PLAYING) {
-            _transitionTo(AudioDaemonState::CLOSE_DELAY);
-        }
-    }
-
-    // 引用计数 + ALSA 均为空闲，进入延迟关闭
-    if (mState == AudioDaemonState::PLAYING && mRefCount == 0 && !mAlsaActive) {
-        debug("轮询检测到 refCount=0 且 ALSA 空闲，进入延迟关闭");
+    } else if (mState == AudioDaemonState::PLAYING && mRefCount == 0) {
+        // 所有文件锁已释放且 refCount 也为 0，进入延迟关闭
+        info("所有唤醒锁已释放，进入延迟关闭");
         _transitionTo(AudioDaemonState::CLOSE_DELAY);
     }
 }
 
-bool AudioDaemon::_checkAlsaPcmStatus() {
-    // 检查常见 PCM 播放设备的状态文件
-    // 根据 ASound.cpp 中的 ALSA 配置：
-    //   hw:0,0   → card0/pcm0p (主声卡播放)
-    //   hw:7,0,0 → card7/pcm0p (dmixer 环路设备)
-    //   hw:1,0   → card1/pcm0p (数字耳机)
-    //   hw:0,0   → card0/pcm0p (模拟耳机 playback path 也走 card0)
-    static const char* pcmStatusPaths[] = {
-        "/proc/asound/card0/pcm0p/sub0/status",
-        "/proc/asound/card0/pcm0p/sub1/status",
-        "/proc/asound/card1/pcm0p/sub0/status",
-        "/proc/asound/card7/pcm0p/sub0/status",
-    };
+// ========== 定时器回调 ==========
 
-    for (auto path : pcmStatusPaths) {
-        std::ifstream f(path);
-        if (!f.good()) continue;
-        std::string content;
-        std::getline(f, content);  // 第一行通常是 "state: RUNNING"
-        if (content.find("RUNNING") != std::string::npos ||
-            content.find("DRAINING") != std::string::npos) {
-            return true;
-        }
+void AudioDaemon::_onCleanupTick() {
+    // 触发状态重评估，期间 _countWakeLocks() 会顺手清理孤儿锁，
+    // _onWakeLockChange() 会根据最新的 fileLocks 和 refCount 做正确的状态转换
+    _onWakeLockChange();
+}
+
+void AudioDaemon::_onCloseTimeout() {
+    info("延迟关闭超时已到期（refCount={}），直接调用 closeAudioOutput", mRefCount);
+    // 先设置强制关闭标记，使得 PEN_HOOK detour 放行
+    mPendingForceClose = true;
+    // 直接通过 PEN_CALL 调用原始 closeAudioOutput（会经过 PEN_HOOK，但 mPendingForceClose 让其放行）
+    auto result = PEN_CALL(uint64, "_ZN12YSoundCenter16closeAudioOutputEv", void*)(YPointer<YSoundCenter>::getInstance());
+    // notifyCloseDone 会由 hook 中的 notifyCloseDone() 调用
+    if (mState != AudioDaemonState::IDLE) {
+        notifyCloseDone();
     }
-    return false;
+    info("closeAudioOutput 直接关闭完成, ret={}", result);
 }
 
 } // namespace mod

@@ -11,6 +11,7 @@
 #include "common/service/Logger.h"
 
 #include <QDir>
+#include <QTimer>
 
 namespace mod::filemanager {
 
@@ -36,6 +37,9 @@ public:
     static AudioSequence getCurrentAudioSequence();
 
     static bool mIsTakeOver;
+
+    /// 供 QML 调⽤：释放当前 MUSIC 引⽤（播放停⽌/关闭播放器时）
+    Q_INVOKABLE void releaseAudio();
 
     /// 清理当前临时软链接
     void cleanupTempSymlinks();
