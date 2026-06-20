@@ -93,6 +93,7 @@ private:
     // --- 定时器回调 ---
     void _onCloseTimeout();
     void _onCleanupTick();
+    void _scheduleWakeLockCheck();
 
     // --- 状态 ---
     AudioDaemonState mState{AudioDaemonState::IDLE};
@@ -107,6 +108,7 @@ private:
     // --- 定时器 ---
     QTimer* mCloseDelayTimer{nullptr};
     QTimer* mCleanupTimer{nullptr};
+    QTimer* mInotifyDebounceTimer{nullptr};
 
     // --- inotify ---
     int                   mInotifyFd{-1};

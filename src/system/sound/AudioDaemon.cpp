@@ -32,6 +32,15 @@ static const char* sourceToString(AudioSource source) {
     return "UNKNOWN";
 }
 
+static const char* stateToString(AudioDaemonState state) {
+    switch (state) {
+    case AudioDaemonState::IDLE:        return "IDLE";
+    case AudioDaemonState::PLAYING:     return "PLAYING";
+    case AudioDaemonState::CLOSE_DELAY: return "CLOSE_DELAY";
+    }
+    return "UNKNOWN";
+}
+
 AudioDaemon::AudioDaemon() : Logger("AudioDaemon") {
     info("AudioDaemon 正在初始化...");
 
@@ -44,6 +53,11 @@ AudioDaemon::AudioDaemon() : Logger("AudioDaemon") {
     // 用于检测外部进程死后未触发 inotify 事件的孤儿锁场景
     mCleanupTimer = new QTimer(this);
     connect(mCleanupTimer, &QTimer::timeout, this, &AudioDaemon::_onCleanupTick);
+
+    // inotify 防抖定时器（单次触发，50ms）
+    mInotifyDebounceTimer = new QTimer(this);
+    mInotifyDebounceTimer->setSingleShot(true);
+    connect(mInotifyDebounceTimer, &QTimer::timeout, this, &AudioDaemon::_onWakeLockChange);
 
     // 读取配置（如果存在）
     json cfg = Config::getInstance().read("AudioDaemon");
@@ -172,13 +186,18 @@ bool AudioDaemon::shouldCloseAudioOutput() {
 
     case AudioDaemonState::PLAYING:
         // 判断是否有任何唤醒锁（refCount + 文件锁）
-        if (mRefCount == 0 && _countWakeLocks() == 0) {
-            // 没有任何引用，进入延迟关闭
-            _transitionTo(AudioDaemonState::CLOSE_DELAY);
-            return false;
+        if (mRefCount == 0) {
+            int fileLocks = _countWakeLocks();
+            if (fileLocks == 0) {
+                // 没有任何引用，进入延迟关闭
+                _transitionTo(AudioDaemonState::CLOSE_DELAY);
+                return false;
+            }
+            // 有外部文件锁占用，无需关闭
+            info("抑制 closeAudioOutput（refCount=0, fileLocks={}）", fileLocks);
+        } else {
+            info("抑制 closeAudioOutput（refCount={}）", mRefCount);
         }
-        // 还有引用或外部锁占用，无需关闭
-        info("抑制 closeAudioOutput（refCount={}, fileLocks={}）", mRefCount, _countWakeLocks());
         return false;
 
     case AudioDaemonState::CLOSE_DELAY:
@@ -199,9 +218,7 @@ void AudioDaemon::notifyCloseDone() {
 void AudioDaemon::_transitionTo(AudioDaemonState newState) {
     if (mState == newState) return;
 
-    info("状态: {} → {}",
-          static_cast<int>(mState),
-          static_cast<int>(newState));
+    info("状态: {} → {}", stateToString(mState), stateToString(newState));
     mState = newState;
     emit stateChanged(mState);
 
@@ -267,8 +284,9 @@ void AudioDaemon::_initInotify() {
         return;
     }
 
+    auto dirPath = mWakeLockDir.toStdString();
     mInotifyWd = inotify_add_watch(mInotifyFd,
-                                    mWakeLockDir.toStdString().c_str(),
+                                    dirPath.c_str(),
                                     IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVED_FROM | IN_MOVED_TO);
 
     if (mInotifyWd < 0) {
@@ -319,16 +337,17 @@ void AudioDaemon::_onInotifyReady(int fd) {
             if (mInotifyWd >= 0) {
                 inotify_rm_watch(mInotifyFd, mInotifyWd);
             }
+            auto dirPath = mWakeLockDir.toStdString();
             mInotifyWd = inotify_add_watch(mInotifyFd,
-                                            mWakeLockDir.toStdString().c_str(),
+                                            dirPath.c_str(),
                                             IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVED_FROM | IN_MOVED_TO);
             if (mInotifyWd < 0) {
                 error("重新添加 inotify watch 失败: {}", strerror(errno));
             }
         }
 
-        // 只要有事件就触发状态检查
-        _onWakeLockChange();
+        // 防抖：50ms 内的连续事件合并为一次状态检查
+        _scheduleWakeLockCheck();
     } else if (n < 0 && errno != EAGAIN) {
         error("inotify read 错误: {}", strerror(errno));
         // 严重的 inotify 错误，重建整个 inotify 实例
@@ -350,7 +369,7 @@ void AudioDaemon::_onInotifyReady(int fd) {
 void AudioDaemon::_onWakeLockChange() {
     int fileLocks = _countWakeLocks();
     info("wake lock 目录变更: fileLocks={}, refCount={}, state={}",
-          fileLocks, mRefCount, static_cast<int>(mState));
+          fileLocks, mRefCount, stateToString(mState));
 
     if (fileLocks > 0 || mRefCount > 0) {
         // 有新的唤醒锁创建（外部进程 touch 了锁文件），需要确保音频输出已打开
@@ -373,6 +392,10 @@ void AudioDaemon::_onWakeLockChange() {
 
 // ========== 定时器回调 ==========
 
+void AudioDaemon::_scheduleWakeLockCheck() {
+    mInotifyDebounceTimer->start(50);
+}
+
 void AudioDaemon::_onCleanupTick() {
     // 触发状态重评估，期间 _countWakeLocks() 会顺手清理孤儿锁，
     // _onWakeLockChange() 会根据最新的 fileLocks 和 refCount 做正确的状态转换
@@ -384,11 +407,8 @@ void AudioDaemon::_onCloseTimeout() {
     // 先设置强制关闭标记，使得 PEN_HOOK detour 放行
     mPendingForceClose = true;
     // 直接通过 PEN_CALL 调用原始 closeAudioOutput（会经过 PEN_HOOK，但 mPendingForceClose 让其放行）
+    // notifyCloseDone 由 hook 负责调用
     auto result = PEN_CALL(uint64, "_ZN12YSoundCenter16closeAudioOutputEv", void*)(YPointer<YSoundCenter>::getInstance());
-    // notifyCloseDone 会由 hook 中的 notifyCloseDone() 调用
-    if (mState != AudioDaemonState::IDLE) {
-        notifyCloseDone();
-    }
     info("closeAudioOutput 直接关闭完成, ret={}", result);
 }
 
