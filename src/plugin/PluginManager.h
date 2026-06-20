@@ -40,13 +40,10 @@ private:
 
     bool parseMetadata(const QString& path, PluginInfo& info);
     bool loadSo(PluginInfo& info);
+    void unloadSo(const QString& pluginId);
     void setPluginPersistence(const PluginInfo& info, bool enable);
-
-    // 对已加载但未初始化引擎的插件，补充调用 attach
     void attachEngineToLoadedPlugins();
-    
-    // 初始化插件的 Hook API
-    void initializePluginHookAPI(const PluginInfo& info);
+    void initializePluginHookAPI(const QString& id, QLibrary* lib);
 
     friend class Singleton<PluginManager>;
 };

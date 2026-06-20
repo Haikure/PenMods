@@ -1,4 +1,5 @@
 #include "PluginManager.h"
+#include "PluginSDK.h"
 #include "QmlPluginWrapper.h"
 #include "common/Event.h"
 #include <QDir>
@@ -33,19 +34,8 @@ PluginManager::PluginManager() : Logger("PluginManager") {
 }
 
 PluginManager::~PluginManager() {
-    for (auto* lib : m_loadedLibraries) {
-        if (lib->isLoaded()) {
-            // 尝试调用插件的清理函数（可选导出）
-            typedef void (*DestroyFunc)();
-            auto destroy = reinterpret_cast<DestroyFunc>(lib->resolve("destroy_plugin"));
-            if (destroy) {
-                destroy();
-            }
-            lib->unload();
-        }
-        delete lib;
-    }
-    m_loadedLibraries.clear();
+    for (const QString& id : m_loadedLibraries.keys())
+        unloadSo(id);
 }
 
 // ------------------------------------------------------------------
@@ -243,13 +233,11 @@ bool PluginManager::loadSo(PluginInfo& info) {
             }
         }
 
-        // ---- 阶段 3: 初始化 Hook API ----
-        initializePluginHookAPI(info);
-
-        // 成功
+        // ---- 阶段 3: 注册到 map，再初始化 Hook API ----
         QFile::remove(loadingFlagPath);
         m_loadedLibraries.insert(info.id, lib);
         info.isLoaded = true;
+        initializePluginHookAPI(info.id, lib);
         spdlog::info("Successfully loaded SO: {}", info.id.toStdString());
         return true;
     }
@@ -270,10 +258,20 @@ void PluginManager::setPluginPersistence(const PluginInfo& info, bool enable) {
         QFile::remove(flagPath);
     } else {
         QFile file(flagPath);
-        if (file.open(QIODevice::WriteOnly)) {
-            file.close();
-        }
+        if (file.open(QIODevice::WriteOnly)) file.close();
     }
+}
+
+void PluginManager::unloadSo(const QString& pluginId) {
+    QLibrary* lib = m_loadedLibraries.take(pluginId);
+    if (!lib) return;
+    if (lib->isLoaded()) {
+        typedef void (*DestroyFunc)();
+        auto destroy = reinterpret_cast<DestroyFunc>(lib->resolve("destroy_plugin"));
+        if (destroy) destroy();
+        lib->unload();
+    }
+    delete lib;
 }
 
 bool PluginManager::togglePlugin(QString pluginId, bool enable) {
@@ -302,11 +300,8 @@ bool PluginManager::togglePlugin(QString pluginId, bool enable) {
                     plugin.isLoaded = true;
                 }
             } else {
+                unloadSo(pluginId);
                 plugin.isLoaded = false;
-                spdlog::info(
-                    "Plugin marked as disabled (restart required to fully unload): {}",
-                    pluginId.toStdString()
-                );
             }
 
             emit pluginsChanged();
@@ -326,22 +321,8 @@ QString PluginManager::getPluginMainQml(const QString& pluginId) {
 bool PluginManager::uninstallPlugin(QString pluginId) {
     for (auto it = m_plugins.begin(); it != m_plugins.end(); ++it) {
         if (it->id == pluginId) {
-            if (it->isEnabled) {
-                togglePlugin(pluginId, false);
-            }
-
-            if (m_loadedLibraries.contains(pluginId)) {
-                QLibrary* lib = m_loadedLibraries.take(pluginId);
-                if (lib->isLoaded()) {
-                    // 调用可选的清理函数
-                    typedef void (*DestroyFunc)();
-                    auto destroy = reinterpret_cast<DestroyFunc>(lib->resolve("destroy_plugin"));
-                    if (destroy) destroy();
-
-                    lib->unload();
-                }
-                delete lib;
-            }
+            if (it->isEnabled) togglePlugin(pluginId, false);
+            unloadSo(pluginId);
 
             QDir pluginDir(it->path);
             if (pluginDir.exists()) {
@@ -404,42 +385,27 @@ static int hookFunctionImpl(void* targetAddr, void* detourFunc, void** originalF
     return result;
 }
 
-// 初始化插件的 Hook API
-void PluginManager::initializePluginHookAPI(const PluginInfo& info) {
-    QLibrary* lib = m_loadedLibraries[info.id];
-    if (!lib || !lib->isLoaded()) {
-        spdlog::warn("Cannot initialize Hook API for {}: library not loaded or null", info.id.toStdString());
-        return;
-    }
+void PluginManager::initializePluginHookAPI(const QString& id, QLibrary* lib) {
+    if (!lib || !lib->isLoaded()) return;
 
-    // 查找插件中的 Hook API 初始化函数
-    typedef void (*InitPluginWithHookAPIFunc)(void*);
+    typedef void (*InitPluginWithHookAPIFunc)(PluginHookAPI*);
     auto initWithHookApi = reinterpret_cast<InitPluginWithHookAPIFunc>(
         lib->resolve("init_plugin_with_hook_api")
     );
-    
-    if (initWithHookApi) {
-        spdlog::info("Calling init_plugin_with_hook_api for plugin: {}", info.id.toStdString());
-        
-        // 构造 Hook API 结构体
-        struct PluginHookAPI {
-            void* (*querySymbol)(const char*);
-            int (*hookFunction)(void*, void*, void**);
-        } hookApi = {
-            &querySymbolImpl,
-            &hookFunctionImpl
-        };
-        
-        try {
-            initWithHookApi(&hookApi);
-            spdlog::info("Hook API initialized successfully for plugin: {}", info.id.toStdString());
-        } catch (const std::exception& e) {
-            spdlog::error("Exception in init_plugin_with_hook_api for plugin {}: {}",
-                         info.id.toStdString(), e.what());
-        }
-    } else {
-        spdlog::debug("Plugin {} does not export init_plugin_with_hook_api(), skipped.",
-                     info.id.toStdString());
+
+    if (!initWithHookApi) {
+        spdlog::debug("Plugin {} does not export init_plugin_with_hook_api(), skipped.", id.toStdString());
+        return;
+    }
+
+    // static: 插件持有指向此结构体的指针，其生命周期必须覆盖插件整个运行期
+    static PluginHookAPI hookApi = { &querySymbolImpl, &hookFunctionImpl };
+
+    try {
+        initWithHookApi(&hookApi);
+        spdlog::info("Hook API initialized for plugin: {}", id.toStdString());
+    } catch (const std::exception& e) {
+        spdlog::error("Exception in init_plugin_with_hook_api for plugin {}: {}", id.toStdString(), e.what());
     }
 }
 

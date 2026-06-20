@@ -72,8 +72,6 @@ typedef struct {
 
 // ==================== 便利宏定义（供插件使用） ====================
 
-#define PLUGIN_HOOK_API_VERSION "1.0"
-
 /**
  * @brief 全局 Hook API 指针（插件应该在 init_plugin_with_hook_api 中初始化）
  *
