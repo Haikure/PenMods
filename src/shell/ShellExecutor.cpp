@@ -13,13 +13,8 @@
 
 namespace mod {
 
-// ============================================================
-// 构造函数与注册
-// ============================================================
-
 ShellExecutor::ShellExecutor(QObject* parent)
     : QObject(parent), Logger("ShellExecutor") {
-    // 在 UI 初始化前将自身注册到 QML 上下文
     connect(&Event::getInstance(), &Event::beforeUiInitialization,
             [this](QQuickView& view, QQmlContext* context) {
                 context->setContextProperty("shell", this);
@@ -27,70 +22,75 @@ ShellExecutor::ShellExecutor(QObject* parent)
             });
 }
 
+ShellExecutor::~ShellExecutor() {
+    for (int id : m_tasks.keys())
+        cleanupTask(id);
+}
+
 // ============================================================
 // 同步执行
 // ============================================================
 
-bool ShellExecutor::runSync(QProcess& process, const QString& command) {
+ShellExecutor::SyncResult ShellExecutor::runSync(QProcess& process, const QString& command) {
     process.setProgram("/bin/sh");
     process.setArguments({"-c", command});
-
-    // 设置合并的 stdout/stderr 读取模式
     process.setProcessChannelMode(QProcess::SeparateChannels);
-
     process.start();
 
     if (!process.waitForStarted(3000)) {
         error("命令启动失败: {}", command.toStdString());
-        return false;
+        return SyncResult::FailedToStart;
     }
 
-    // 等待完成（带超时）
     if (m_timeoutMs > 0) {
         if (!process.waitForFinished(m_timeoutMs)) {
             warn("命令执行超时，已终止: {}", command.toStdString());
             process.kill();
             process.waitForFinished(1000);
-            return false;
+            return SyncResult::TimedOut;
         }
     } else {
-        process.waitForFinished(-1); // 不限时等待
+        process.waitForFinished(-1);
     }
 
-    return true;
+    return SyncResult::Ok;
 }
 
 QString ShellExecutor::exec(const QString& command) {
     QProcess process;
-    if (!runSync(process, command)) {
+    if (runSync(process, command) != SyncResult::Ok)
         return QString();
-    }
-
     return QString::fromUtf8(process.readAllStandardOutput()).trimmed();
 }
 
 QJsonObject ShellExecutor::execWithResult(const QString& command) {
-    QProcess process;
-    bool timedOut = !runSync(process, command);
-
-    return buildResult(process, timedOut);
+    QProcess   process;
+    SyncResult sr = runSync(process, command);
+    return buildResult(process, sr);
 }
 
-QJsonObject ShellExecutor::buildResult(QProcess& process, bool timedOut) const {
+QJsonObject ShellExecutor::buildResult(QProcess& process, SyncResult sr) const {
     QJsonObject result;
-    result["stdout"]   = QString::fromUtf8(process.readAllStandardOutput());
-    result["stderr"]   = QString::fromUtf8(process.readAllStandardError());
+    result["stdout"] = QString::fromUtf8(process.readAllStandardOutput());
+    result["stderr"] = QString::fromUtf8(process.readAllStandardError());
 
-    if (timedOut) {
+    switch (sr) {
+    case SyncResult::Ok:
+        result["exitCode"] = process.exitCode();
+        result["timedOut"] = false;
+        if (process.exitCode() != 0)
+            result["error"] = QString("Command failed with exit code %1").arg(process.exitCode());
+        break;
+    case SyncResult::TimedOut:
         result["exitCode"] = -1;
         result["timedOut"] = true;
         result["error"]    = "Command timed out";
-    } else {
-        result["exitCode"] = process.exitCode();
+        break;
+    case SyncResult::FailedToStart:
+        result["exitCode"] = -1;
         result["timedOut"] = false;
-        if (process.exitCode() != 0) {
-            result["error"] = QString("Command failed with exit code %1").arg(process.exitCode());
-        }
+        result["error"]    = "Failed to start process";
+        break;
     }
 
     return result;
@@ -100,140 +100,164 @@ QJsonObject ShellExecutor::buildResult(QProcess& process, bool timedOut) const {
 // 异步执行
 // ============================================================
 
-void ShellExecutor::execAsync(const QString& command, QJSValue callback) {
-    // 如果有旧进程（无论是否还在运行），先清理并递增 generation
-    if (m_asyncProcess) {
-        warn("异步命令正在执行中，终止旧命令: {}", m_asyncCommand.toStdString());
-        cleanupAsync();
-    }
-
+int ShellExecutor::execAsync(const QString& command, QJSValue callback) {
     if (!callback.isCallable()) {
         error("execAsync 的回调参数不是可调用的函数");
-        return;
+        return -1;
     }
 
-    // 递增世代号，使旧信号处理器的 generation 检查失败
-    m_asyncGeneration++;
+    const int taskId = m_nextTaskId++;
 
-    m_asyncCommand = command;
-    m_asyncCallback = callback;
-    m_asyncStdout.clear();
-    m_asyncStderr.clear();
+    auto* task      = new AsyncTask;
+    task->id        = taskId;
+    task->command   = command;
+    task->callback  = callback;
+    task->process   = new QProcess(this);
 
-    // 创建进程
-    m_asyncProcess = new QProcess(this);
-    m_asyncProcess->setProgram("/bin/sh");
-    m_asyncProcess->setArguments({"-c", command});
-    m_asyncProcess->setProcessChannelMode(QProcess::SeparateChannels);
+    task->process->setProgram("/bin/sh");
+    task->process->setArguments({"-c", command});
+    task->process->setProcessChannelMode(QProcess::SeparateChannels);
 
-    // 记录当前 generation，供 lambda 捕获
-    const int generation = m_asyncGeneration;
+    m_tasks.insert(taskId, task);
+    emit activeCountChanged(m_tasks.size());
 
-    // 连接信号
-    connect(m_asyncProcess, &QProcess::started, this, [this, generation, command]() {
-        if (generation != m_asyncGeneration) return;
-        info("异步命令已启动: {}", command.toStdString());
-        emit started(command);
+    connect(task->process, &QProcess::started, this, [this, taskId]() {
+        auto* t = m_tasks.value(taskId);
+        if (!t) return;
+        info("异步命令已启动 [{}]: {}", taskId, t->command.toStdString());
+        emit started(taskId, t->command);
     });
 
-    connect(m_asyncProcess, &QProcess::readyReadStandardOutput, this, [this, generation]() {
-        if (generation != m_asyncGeneration || !m_asyncProcess) return;
-        QString data = QString::fromUtf8(m_asyncProcess->readAllStandardOutput());
-        m_asyncStdout += data;
-        emit stdoutReady(data);
+    connect(task->process, &QProcess::readyReadStandardOutput, this, [this, taskId]() {
+        auto* t = m_tasks.value(taskId);
+        if (!t) return;
+        QString data = QString::fromUtf8(t->process->readAllStandardOutput());
+        t->stdoutBuf += data;
+        emit stdoutReady(taskId, t->command, data);
     });
 
-    connect(m_asyncProcess, &QProcess::readyReadStandardError, this, [this, generation]() {
-        if (generation != m_asyncGeneration || !m_asyncProcess) return;
-        QString data = QString::fromUtf8(m_asyncProcess->readAllStandardError());
-        m_asyncStderr += data;
-        emit stderrReady(data);
+    connect(task->process, &QProcess::readyReadStandardError, this, [this, taskId]() {
+        auto* t = m_tasks.value(taskId);
+        if (!t) return;
+        QString data = QString::fromUtf8(t->process->readAllStandardError());
+        t->stderrBuf += data;
+        emit stderrReady(taskId, t->command, data);
     });
 
-    connect(m_asyncProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, generation](int exitCode, QProcess::ExitStatus status) {
-        // 世代号不匹配，说明此信号属于已废弃的旧命令，忽略
-        if (generation != m_asyncGeneration) return;
+    connect(task->process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, taskId](int, QProcess::ExitStatus) {
+        finishTask(taskId, false);
+    });
 
-        // 停止超时定时器
-        if (m_asyncTimer) {
-            m_asyncTimer->stop();
-        }
+    connect(task->process, &QProcess::errorOccurred, this, [this, taskId](QProcess::ProcessError err) {
+        if (err != QProcess::FailedToStart) return;
+        auto* t = m_tasks.value(taskId);
+        if (!t) return;
+        error("异步命令启动失败 [{}]: {}", taskId, t->command.toStdString());
 
-        // 构建结果
         QJsonObject result;
-        result["stdout"]   = m_asyncStdout;
-        result["stderr"]   = m_asyncStderr;
-        result["exitCode"] = exitCode;
+        result["stdout"]   = QString();
+        result["stderr"]   = QString();
+        result["exitCode"] = -1;
         result["timedOut"] = false;
+        result["error"]    = "Failed to start process";
 
-        if (status != QProcess::NormalExit) {
-            result["error"] = "Process crashed";
-        } else if (exitCode != 0) {
-            result["error"] = QString("Command failed with exit code %1").arg(exitCode);
-        }
+        QJSValue cb      = t->callback;
+        QString  cmd     = t->command;
+        cleanupTask(taskId);
 
-        info("异步命令已完成: {} (exitCode: {})", m_asyncCommand.toStdString(), exitCode);
+        emit finished(taskId, cmd, -1);
+        emit errorOccurred(taskId, cmd, "Failed to start process");
 
-        // 先保存回调副本并清理资源，再调用回调 —— 防止回调中再次调用 execAsync 导致状态混乱
-        QJSValue callbackCopy = m_asyncCallback;
-        const QString cmdCopy = m_asyncCommand;
-        cleanupAsync();
-
-        emit finished(cmdCopy, exitCode);
-
-        // 调用 JS 回调（此时状态已清理，回调中调用 execAsync 是安全的）
-        if (callbackCopy.isCallable()) {
+        if (cb.isCallable()) {
             QJSValueList args;
-            args << callbackCopy.engine()->toScriptValue(result);
-            callbackCopy.call(args);
+            args << cb.engine()->toScriptValue(result);
+            cb.call(args);
         }
     });
 
-    // 设置超时定时器
     if (m_timeoutMs > 0) {
-        m_asyncTimer = new QTimer(this);
-        m_asyncTimer->setSingleShot(true);
-        connect(m_asyncTimer, &QTimer::timeout, this, [this, generation]() {
-            // 世代号不匹配，忽略
-            if (generation != m_asyncGeneration) return;
-
-            warn("异步命令执行超时，已终止: {}", m_asyncCommand.toStdString());
-
-            if (!m_asyncProcess) return;
-
-            // 递增 generation 使 finished 信号处理器的检查失败，防止双重清理
-            m_asyncGeneration++;
-
-            m_asyncProcess->kill();
-
-            // 构建超时结果
-            QJsonObject result;
-            result["stdout"]   = m_asyncStdout;
-            result["stderr"]   = m_asyncStderr;
-            result["exitCode"] = -1;
-            result["timedOut"] = true;
-            result["error"]    = "Command timed out";
-
-            // 保存回调副本并先清理
-            QJSValue callbackCopy = m_asyncCallback;
-            const QString cmdCopy = m_asyncCommand;
-            cleanupAsync();
-
-            emit finished(cmdCopy, -1);
-            emit errorOccurred(cmdCopy, "Command timed out");
-
-            if (callbackCopy.isCallable()) {
-                QJSValueList args;
-                args << callbackCopy.engine()->toScriptValue(result);
-                callbackCopy.call(args);
-            }
+        task->timer = new QTimer(this);
+        task->timer->setSingleShot(true);
+        connect(task->timer, &QTimer::timeout, this, [this, taskId]() {
+            finishTask(taskId, true);
         });
-        m_asyncTimer->start(m_timeoutMs);
+        task->timer->start(m_timeoutMs);
     }
 
-    // 启动进程
-    m_asyncProcess->start();
+    task->process->start();
+    info("异步命令已发起 [taskId={}]: {}", taskId, command.toStdString());
+    return taskId;
+}
+
+void ShellExecutor::finishTask(int taskId, bool timedOut) {
+    auto* t = m_tasks.value(taskId);
+    if (!t) return;
+
+    if (timedOut) {
+        warn("异步命令超时 [{}]: {}", taskId, t->command.toStdString());
+        if (t->process->state() != QProcess::NotRunning) {
+            t->process->kill();
+            t->process->waitForFinished(1000);
+        }
+    } else {
+        info("异步命令已完成 [{}]: {} (exitCode: {})",
+             taskId, t->command.toStdString(), t->process->exitCode());
+    }
+
+    QJsonObject result;
+    result["taskId"]   = taskId;
+    result["stdout"]   = t->stdoutBuf;
+    result["stderr"]   = t->stderrBuf;
+    result["timedOut"] = timedOut;
+
+    if (timedOut) {
+        result["exitCode"] = -1;
+        result["error"]    = "Command timed out";
+    } else {
+        int exitCode = t->process->exitCode();
+        result["exitCode"] = exitCode;
+        if (t->process->exitStatus() != QProcess::NormalExit)
+            result["error"] = "Process crashed";
+        else if (exitCode != 0)
+            result["error"] = QString("Command failed with exit code %1").arg(exitCode);
+    }
+
+    QJSValue cb  = t->callback;
+    QString  cmd = t->command;
+    int      exit = result["exitCode"].toInt();
+    cleanupTask(taskId);
+
+    emit finished(taskId, cmd, exit);
+    if (timedOut) emit errorOccurred(taskId, cmd, "Command timed out");
+
+    if (cb.isCallable()) {
+        QJSValueList args;
+        args << cb.engine()->toScriptValue(result);
+        cb.call(args);
+    }
+}
+
+void ShellExecutor::cleanupTask(int taskId) {
+    auto* t = m_tasks.take(taskId);
+    if (!t) return;
+
+    if (t->timer) {
+        t->timer->stop();
+        t->timer->deleteLater();
+    }
+
+    if (t->process) {
+        t->process->disconnect();
+        if (t->process->state() != QProcess::NotRunning) {
+            t->process->kill();
+            t->process->waitForFinished(1000);
+        }
+        t->process->deleteLater();
+    }
+
+    delete t;
+    emit activeCountChanged(m_tasks.size());
 }
 
 // ============================================================
@@ -242,11 +266,31 @@ void ShellExecutor::execAsync(const QString& command, QJSValue callback) {
 
 void ShellExecutor::startDetached(const QString& command) {
     bool ok = QProcess::startDetached("/bin/sh", QStringList{"-c", command});
-    if (ok) {
-        info("分离执行命令: {}", command.toStdString());
-    } else {
-        error("分离执行命令失败: {}", command.toStdString());
+    if (ok) info("分离执行命令: {}", command.toStdString());
+    else    error("分离执行命令失败: {}", command.toStdString());
+}
+
+// ============================================================
+// Kill
+// ============================================================
+
+void ShellExecutor::kill() {
+    if (m_tasks.isEmpty()) {
+        debug("kill() 被调用，但没有正在运行的异步命令");
+        return;
     }
+    warn("终止所有异步命令 (共 {} 个)", m_tasks.size());
+    for (int id : m_tasks.keys())
+        cleanupTask(id);
+}
+
+void ShellExecutor::kill(int taskId) {
+    if (!m_tasks.contains(taskId)) {
+        warn("kill({}) 被调用，但该任务不存在", taskId);
+        return;
+    }
+    warn("终止异步命令 [{}]", taskId);
+    cleanupTask(taskId);
 }
 
 // ============================================================
@@ -259,6 +303,7 @@ void ShellExecutor::setTimeout(int ms) {
         return;
     }
     m_timeoutMs = ms;
+    emit timeoutChanged(ms);
     info("Shell 命令超时时间已设置为 {} ms", m_timeoutMs);
 }
 
@@ -266,52 +311,10 @@ int ShellExecutor::getTimeout() const {
     return m_timeoutMs;
 }
 
-// ============================================================
-// 终止当前异步命令
-// ============================================================
-
-void ShellExecutor::kill() {
-    if (m_asyncProcess) {
-        warn("手动终止异步命令: {}", m_asyncCommand.toStdString());
-        // 递增 generation 使 finished 信号处理器失效
-        m_asyncGeneration++;
-        // 直接清理，不再依赖 finished 信号的回调
-        cleanupAsync();
-    } else {
-        debug("kill() 被调用，但没有正在运行的异步命令");
-    }
-}
-
-// ============================================================
-// 清理
-// ============================================================
-
-void ShellExecutor::cleanupAsync() {
-    // 先断开所有旧信号连接，防止 deleteLater 前有信号触发
-    if (m_asyncTimer) {
-        m_asyncTimer->disconnect(this);
-        m_asyncTimer->stop();
-        m_asyncTimer->deleteLater();
-        m_asyncTimer = nullptr;
-    }
-
-    if (m_asyncProcess) {
-        m_asyncProcess->disconnect(this);
-        if (m_asyncProcess->state() != QProcess::NotRunning) {
-            m_asyncProcess->kill();
-            m_asyncProcess->waitForFinished(1000);
-        }
-        m_asyncProcess->deleteLater();
-        m_asyncProcess = nullptr;
-    }
-
-    m_asyncCallback = QJSValue();
-    m_asyncCommand.clear();
-    m_asyncStdout.clear();
-    m_asyncStderr.clear();
+int ShellExecutor::activeCount() const {
+    return m_tasks.size();
 }
 
 } // namespace mod
 
-// ========== 静态初始化：确保 ShellExecutor 实例在 UI 初始化前被创建 ==========
 static auto& s_ensureShellInit = mod::ShellExecutor::getInstance();
