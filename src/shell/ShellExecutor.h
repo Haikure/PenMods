@@ -156,6 +156,9 @@ private:
     /// 清理异步资源（断开信号、删除进程和定时器）
     void cleanupAsync();
 
+    /// 自增的异步命令世代号，用于防止陈旧信号干扰新命令
+    int m_asyncGeneration = 0;
+
     friend class Singleton<ShellExecutor>;
 };
 

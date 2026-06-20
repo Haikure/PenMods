@@ -101,8 +101,8 @@ QJsonObject ShellExecutor::buildResult(QProcess& process, bool timedOut) const {
 // ============================================================
 
 void ShellExecutor::execAsync(const QString& command, QJSValue callback) {
-    // 如果已有正在执行的异步命令，先清理
-    if (m_asyncProcess && m_asyncProcess->state() != QProcess::NotRunning) {
+    // 如果有旧进程（无论是否还在运行），先清理并递增 generation
+    if (m_asyncProcess) {
         warn("异步命令正在执行中，终止旧命令: {}", m_asyncCommand.toStdString());
         cleanupAsync();
     }
@@ -111,6 +111,9 @@ void ShellExecutor::execAsync(const QString& command, QJSValue callback) {
         error("execAsync 的回调参数不是可调用的函数");
         return;
     }
+
+    // 递增世代号，使旧信号处理器的 generation 检查失败
+    m_asyncGeneration++;
 
     m_asyncCommand = command;
     m_asyncCallback = callback;
@@ -123,26 +126,35 @@ void ShellExecutor::execAsync(const QString& command, QJSValue callback) {
     m_asyncProcess->setArguments({"-c", command});
     m_asyncProcess->setProcessChannelMode(QProcess::SeparateChannels);
 
+    // 记录当前 generation，供 lambda 捕获
+    const int generation = m_asyncGeneration;
+
     // 连接信号
-    connect(m_asyncProcess, &QProcess::started, this, [this, command]() {
+    connect(m_asyncProcess, &QProcess::started, this, [this, generation, command]() {
+        if (generation != m_asyncGeneration) return;
         info("异步命令已启动: {}", command.toStdString());
         emit started(command);
     });
 
-    connect(m_asyncProcess, &QProcess::readyReadStandardOutput, this, [this]() {
+    connect(m_asyncProcess, &QProcess::readyReadStandardOutput, this, [this, generation]() {
+        if (generation != m_asyncGeneration || !m_asyncProcess) return;
         QString data = QString::fromUtf8(m_asyncProcess->readAllStandardOutput());
         m_asyncStdout += data;
         emit stdoutReady(data);
     });
 
-    connect(m_asyncProcess, &QProcess::readyReadStandardError, this, [this]() {
+    connect(m_asyncProcess, &QProcess::readyReadStandardError, this, [this, generation]() {
+        if (generation != m_asyncGeneration || !m_asyncProcess) return;
         QString data = QString::fromUtf8(m_asyncProcess->readAllStandardError());
         m_asyncStderr += data;
         emit stderrReady(data);
     });
 
     connect(m_asyncProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int exitCode, QProcess::ExitStatus status) {
+            this, [this, generation](int exitCode, QProcess::ExitStatus status) {
+        // 世代号不匹配，说明此信号属于已废弃的旧命令，忽略
+        if (generation != m_asyncGeneration) return;
+
         // 停止超时定时器
         if (m_asyncTimer) {
             m_asyncTimer->stop();
@@ -162,48 +174,59 @@ void ShellExecutor::execAsync(const QString& command, QJSValue callback) {
         }
 
         info("异步命令已完成: {} (exitCode: {})", m_asyncCommand.toStdString(), exitCode);
-        emit finished(m_asyncCommand, exitCode);
 
-        // 调用 JS 回调
-        if (m_asyncCallback.isCallable()) {
-            QJSValueList args;
-            args << m_asyncCallback.engine()->toScriptValue(result);
-            m_asyncCallback.call(args);
-        }
-
-        // 清理
+        // 先保存回调副本并清理资源，再调用回调 —— 防止回调中再次调用 execAsync 导致状态混乱
+        QJSValue callbackCopy = m_asyncCallback;
+        const QString cmdCopy = m_asyncCommand;
         cleanupAsync();
+
+        emit finished(cmdCopy, exitCode);
+
+        // 调用 JS 回调（此时状态已清理，回调中调用 execAsync 是安全的）
+        if (callbackCopy.isCallable()) {
+            QJSValueList args;
+            args << callbackCopy.engine()->toScriptValue(result);
+            callbackCopy.call(args);
+        }
     });
 
     // 设置超时定时器
     if (m_timeoutMs > 0) {
         m_asyncTimer = new QTimer(this);
         m_asyncTimer->setSingleShot(true);
-        connect(m_asyncTimer, &QTimer::timeout, this, [this]() {
+        connect(m_asyncTimer, &QTimer::timeout, this, [this, generation]() {
+            // 世代号不匹配，忽略
+            if (generation != m_asyncGeneration) return;
+
             warn("异步命令执行超时，已终止: {}", m_asyncCommand.toStdString());
 
-            if (m_asyncProcess) {
-                m_asyncProcess->kill();
+            if (!m_asyncProcess) return;
 
-                // 构建超时结果
-                QJsonObject result;
-                result["stdout"]   = m_asyncStdout;
-                result["stderr"]   = m_asyncStderr;
-                result["exitCode"] = -1;
-                result["timedOut"] = true;
-                result["error"]    = "Command timed out";
+            // 递增 generation 使 finished 信号处理器的检查失败，防止双重清理
+            m_asyncGeneration++;
 
-                emit finished(m_asyncCommand, -1);
-                emit errorOccurred(m_asyncCommand, "Command timed out");
+            m_asyncProcess->kill();
 
-                // 调用 JS 回调
-                if (m_asyncCallback.isCallable()) {
-                    QJSValueList args;
-                    args << m_asyncCallback.engine()->toScriptValue(result);
-                    m_asyncCallback.call(args);
-                }
+            // 构建超时结果
+            QJsonObject result;
+            result["stdout"]   = m_asyncStdout;
+            result["stderr"]   = m_asyncStderr;
+            result["exitCode"] = -1;
+            result["timedOut"] = true;
+            result["error"]    = "Command timed out";
 
-                cleanupAsync();
+            // 保存回调副本并先清理
+            QJSValue callbackCopy = m_asyncCallback;
+            const QString cmdCopy = m_asyncCommand;
+            cleanupAsync();
+
+            emit finished(cmdCopy, -1);
+            emit errorOccurred(cmdCopy, "Command timed out");
+
+            if (callbackCopy.isCallable()) {
+                QJSValueList args;
+                args << callbackCopy.engine()->toScriptValue(result);
+                callbackCopy.call(args);
             }
         });
         m_asyncTimer->start(m_timeoutMs);
@@ -248,10 +271,12 @@ int ShellExecutor::getTimeout() const {
 // ============================================================
 
 void ShellExecutor::kill() {
-    if (m_asyncProcess && m_asyncProcess->state() != QProcess::NotRunning) {
+    if (m_asyncProcess) {
         warn("手动终止异步命令: {}", m_asyncCommand.toStdString());
-        m_asyncProcess->kill();
-        // cleanup 会在 finished 信号处理中执行
+        // 递增 generation 使 finished 信号处理器失效
+        m_asyncGeneration++;
+        // 直接清理，不再依赖 finished 信号的回调
+        cleanupAsync();
     } else {
         debug("kill() 被调用，但没有正在运行的异步命令");
     }
@@ -262,13 +287,20 @@ void ShellExecutor::kill() {
 // ============================================================
 
 void ShellExecutor::cleanupAsync() {
+    // 先断开所有旧信号连接，防止 deleteLater 前有信号触发
     if (m_asyncTimer) {
+        m_asyncTimer->disconnect(this);
         m_asyncTimer->stop();
         m_asyncTimer->deleteLater();
         m_asyncTimer = nullptr;
     }
 
     if (m_asyncProcess) {
+        m_asyncProcess->disconnect(this);
+        if (m_asyncProcess->state() != QProcess::NotRunning) {
+            m_asyncProcess->kill();
+            m_asyncProcess->waitForFinished(1000);
+        }
         m_asyncProcess->deleteLater();
         m_asyncProcess = nullptr;
     }
