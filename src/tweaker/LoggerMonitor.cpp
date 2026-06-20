@@ -10,6 +10,8 @@
 
 #include <QQmlContext>
 
+#include <cctype>
+
 namespace mod {
 
 LoggerMonitor::LoggerMonitor() {
@@ -19,6 +21,13 @@ LoggerMonitor::LoggerMonitor() {
     mNoUploadUserAction = mCfg["no_upload_user_action"];
     mNoUploadRawScanImg = mCfg["no_upload_raw_scan_img"];
     mNoUploadHttplog    = mCfg["no_upload_httplog"];
+
+    // 读取过滤标签列表
+    if (mCfg.contains("filtered_tags") && mCfg["filtered_tags"].is_array()) {
+        for (auto& tag : mCfg["filtered_tags"]) {
+            mFilteredTags.insert(tag.get<std::string>());
+        }
+    }
 
     // 为原生日志拦截器启用彩色输出
     mReplacer->set_pattern("[%H:%M:%S.%e] [%n] [%^%l%$] %^%v%$");
@@ -63,6 +72,24 @@ void LoggerMonitor::setNoUploadHttplog(bool val) {
     }
 }
 
+bool LoggerMonitor::isTagFiltered(const std::string& message) {
+    if (mFilteredTags.empty()) return false;
+
+    // 原始消息格式示例: "[YDownloader] download finished. task 10143..."
+    // 或: "[queue] sem_timedwait() timed out"
+    // 只需提取第一个 [...] 中的内容作为标签名进行匹配
+    auto openBracket = message.find('[');
+    if (openBracket == std::string::npos) return false;
+
+    auto closeBracket = message.find(']', openBracket);
+    if (closeBracket == std::string::npos) return false;
+
+    if (closeBracket <= openBracket + 1) return false;  // 空括号
+
+    std::string tag = message.substr(openBracket + 1, closeBracket - openBracket - 1);
+    return mFilteredTags.find(tag) != mFilteredTags.end();
+}
+
 } // namespace mod
 
 // Local Logging
@@ -78,7 +105,9 @@ PEN_HOOK(void, runtime_log, int priority, const char* format, ...) {
         if (buffer[len - 1] == '\n') {
             buffer[len - 1] = '\0';
         }
-        mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+        if (!mod::LoggerMonitor::getInstance().isTagFiltered(buffer)) {
+            mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+        }
     }
 }
 
@@ -93,7 +122,9 @@ PEN_HOOK(void, DictPen_log, int priority, const char* format, ...) {
         if (buffer[len - 1] == '\n') {
             buffer[len - 1] = '\0';
         }
-        mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+        if (!mod::LoggerMonitor::getInstance().isTagFiltered(buffer)) {
+            mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+        }
     }
 }
 
@@ -119,7 +150,9 @@ PEN_HOOK(
         if (buffer[len - 1] == '\n') {
             buffer[len - 1] = '\0';
         }
-        mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+        if (!mod::LoggerMonitor::getInstance().isTagFiltered(buffer)) {
+            mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+        }
     }
     return 1;
 }
@@ -135,7 +168,9 @@ PEN_HOOK(void, printf, const char* format, ...) {
         if (buffer[len - 1] == '\n') {
             buffer[len - 1] = '\0';
         }
-        mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+        if (!mod::LoggerMonitor::getInstance().isTagFiltered(buffer)) {
+            mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+        }
     }
 }
 
@@ -152,7 +187,9 @@ PEN_HOOK(void, fprintf, FILE* stream, const char* format, ...) {
             if (buffer[len - 1] == '\n') {
                 buffer[len - 1] = '\0';
             }
-            mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+            if (!mod::LoggerMonitor::getInstance().isTagFiltered(buffer)) {
+                mod::LoggerMonitor::getInstance().getLogging()->debug(buffer);
+            }
         }
     }
     va_end(args);

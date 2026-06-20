@@ -44,6 +44,17 @@ Config::Config() : Logger("Config") {
             {"no_upload_user_action", true},
             {"no_upload_raw_scan_img", true},
             {"no_upload_httplog", true},
+            {"filtered_tags", {
+                "queue", "sender",
+                "YDownloader", "YColumnDb", "YHttpManager",
+                "YHistoryManager", "YWordBookManager", "YNetTranslateEngine",
+                "YColumnManager", "YMediaManager", "YMediaPlayerManager",
+                "YTextBookDb", "YTextBookManager", "YTextBookBlockManager",
+                "YTextBookTaskManager", "YStrokeManager", "YInteractiveLearningManager",
+                "YReadingBookQuestionOptionManager",
+                "YLoginManager", "BlueToothManager",
+                "YRecordCenter", "YSystemBase", "YLogManager"
+            }},
             {"levels", {
                 {"Config", "debug"},
                 {"MusicPlayer", "info"},

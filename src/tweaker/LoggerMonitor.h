@@ -8,6 +8,8 @@
 
 #include "mod/Config.h"
 
+#include <unordered_set>
+
 namespace mod {
 
 class LoggerMonitor : public QObject, public Singleton<LoggerMonitor> {
@@ -36,6 +38,10 @@ public:
 
     bool isNativeLoggingDisabled();
 
+    /// 检查日志消息中的分类标签是否被过滤
+    /// 解析格式: [timestamp] [native] [level] [tag] ... → 匹配 [tag] 是否在过滤列表中
+    bool isTagFiltered(const std::string& message);
+
 signals:
 
     void noUploadUserActionChanged();
@@ -56,6 +62,9 @@ private:
     bool mNoUploadHttplog;
 
     std::shared_ptr<spdlog::logger> mReplacer = spdlog::stdout_color_mt("native");
+
+    /// 被过滤的标签列表（如 "YDownloader", "queue" 等）
+    std::unordered_set<std::string> mFilteredTags;
 };
 
 } // namespace mod
