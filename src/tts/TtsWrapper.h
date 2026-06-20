@@ -37,22 +37,27 @@ public:
      * @param type    TTS 引擎类型（0 = 默认）
      */
     Q_INVOKABLE void speak(const QString& word, const QString& lang = "en", const QString& phonetic = QString(), int type = 0);
-
-    /**
-     * @brief 用美式英语朗读（便捷方法）
-     */
     Q_INVOKABLE void speakEnglish(const QString& word);
-
-    /**
-     * @brief 用中文朗读（便捷方法）
-     */
     Q_INVOKABLE void speakChinese(const QString& word);
+    Q_INVOKABLE void stop();
+    Q_INVOKABLE bool isPlaying();
 
 signals:
     // 通知 QML 层 TTS 播放结束
     void speakFinished();
 
 private:
+    void* soundCenter();
+
+    using PlayFn      = void(*)(void*, const QString&, const QString&, const QString&, int);
+    using StopFn      = void(*)(void*);
+    using IsPlayingFn = bool(*)(void*);
+
+    void*       m_soundCenter  = nullptr;
+    PlayFn      m_playFn       = nullptr;
+    StopFn      m_stopFn       = nullptr;
+    IsPlayingFn m_isPlayingFn  = nullptr;
+
     friend class Singleton<TtsWrapper>;
 };
 

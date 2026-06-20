@@ -23,43 +23,77 @@ TtsWrapper::TtsWrapper(QObject* parent) : QObject(parent), Logger("TtsWrapper") 
     });
 }
 
+void* TtsWrapper::soundCenter() {
+    if (m_soundCenter) return m_soundCenter;
+
+    auto instanceFn = reinterpret_cast<void*(*)()>(
+        PEN_SYM("_ZN10YSingletonI12YSoundCenterE8instanceEv"));
+    if (!instanceFn) {
+        error("无法解析 YSoundCenter 实例符号");
+        return nullptr;
+    }
+
+    m_soundCenter = instanceFn();
+    if (!m_soundCenter) {
+        error("YSoundCenter 实例为空");
+        return nullptr;
+    }
+
+    m_playFn = reinterpret_cast<PlayFn>(
+        PEN_SYM("_ZN12YSoundCenter4playERK7QStringS2_S2_i"));
+    m_stopFn = reinterpret_cast<StopFn>(
+        PEN_SYM("_ZN12YSoundCenter4stopEv"));
+    m_isPlayingFn = reinterpret_cast<IsPlayingFn>(
+        PEN_SYM("_ZN12YSoundCenter9isPlayingEv"));
+
+    // 把 YSoundCenter::soundEnd() 转发为 speakFinished()
+    connect(reinterpret_cast<QObject*>(m_soundCenter), SIGNAL(soundEnd()),
+            this, SIGNAL(speakFinished()));
+
+    info("YSoundCenter 实例已缓存，speakFinished 信号已连接。");
+    return m_soundCenter;
+}
+
 void TtsWrapper::speak(const QString& word, const QString& lang, const QString& phonetic, int type) {
     if (word.isEmpty()) {
         warn("speak() 收到空文本，跳过。");
         return;
     }
 
-    debug("TTS speak: word='{}', lang='{}', phonetic='{}', type={}",
-          word.toStdString(), lang.toStdString(), phonetic.toStdString(), type);
+    void* sc = soundCenter();
+    if (!sc) return;
 
-    // 获取 YSoundCenter 单例指针
-    // 符号: _ZN10YSingletonI12YSoundCenterE8instanceEv
-    auto* soundCenter = ((void*(*)())(PEN_SYM("_ZN10YSingletonI12YSoundCenterE8instanceEv")))();
-
-    if (!soundCenter) {
-        error("YSoundCenter 实例为空，无法播放 TTS。");
+    if (!m_playFn) {
+        error("无法解析 YSoundCenter::play 符号");
         return;
     }
 
-    // 调用原始固件的 YSoundCenter::play(QString, QString, QString, int)
-    // 符号: _ZN12YSoundCenter4playERK7QStringS2_S2_i
-    PEN_CALL(void, "_ZN12YSoundCenter4playERK7QStringS2_S2_i",
-             void*, QString const&, QString const&, QString const&, int)
-    (soundCenter, word, lang, phonetic, type);
+    debug("TTS speak: word='{}', lang='{}', phonetic='{}', type={}",
+          word.toStdString(), lang.toStdString(), phonetic.toStdString(), type);
 
+    m_playFn(sc, word, lang, phonetic, type);
     info("TTS 已朗读: {}", word.toStdString());
 }
 
 void TtsWrapper::speakEnglish(const QString& word) {
-    if (word.isEmpty()) return;
-    // type=0x0E 对应 Microsoft TTS（英语 TTS 引擎）
     speak(word, "en-US", QString(), 0x0E);
 }
 
 void TtsWrapper::speakChinese(const QString& word) {
-    if (word.isEmpty()) return;
-    // type=0 对应默认 TTS 引擎
     speak(word, "zh-CHS", QString(), 0);
+}
+
+void TtsWrapper::stop() {
+    void* sc = soundCenter();
+    if (!sc || !m_stopFn) return;
+    m_stopFn(sc);
+    info("TTS 已停止");
+}
+
+bool TtsWrapper::isPlaying() {
+    void* sc = soundCenter();
+    if (!sc || !m_isPlayingFn) return false;
+    return m_isPlayingFn(sc);
 }
 
 } // namespace mod
