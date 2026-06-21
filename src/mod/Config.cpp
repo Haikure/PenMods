@@ -132,14 +132,36 @@ Config::Config() : Logger("Config") {
         }},
         {"ai", {
             {"speech_assistant", false},
-            {"chatbot", {
-                {"api_key", ""},
-                {"api_endpoint", "https://api.deepseek.com/v1/chat/completions"},
-                {"model", "deepseek-chat"},
-                {"temperature", 0.7},
-                {"default_prompt", "你是一个有用的助手，使用中文回复用户的问题。"},
-                {"streaming", true}
-            }}
+            {"streaming", true},
+            {"models", json::array({
+                json{
+                    {"id",          "deepseek-v4-flash"},
+                    {"name",        "DeepSeek Chat"},
+                    {"provider",    "DeepSeek"},
+                    {"endpoint",    "https://api.deepseek.com/v1/chat/completions"},
+                    {"modelId",     "deepseek-v4-flash"},
+                    {"apiKey",      ""},
+                    {"temperature", 0.7},
+                    {"maxContextSize", 0},
+                    {"capabilities", json{
+                        {"text",      true},
+                        {"vision",    false},
+                        {"audio",     false},
+                        {"toolCall",  false},
+                        {"reasoning", false}
+                    }},
+                    {"extraParams", ""}
+                }
+            })},
+            {"activeModelId", "deepseek-v4-flash"},
+            {"prompts", json::array({
+                json{
+                    {"id",      "default"},
+                    {"name",    "通用助手"},
+                    {"content", "你是一个有用的助手，使用中文回复用户的问题。"}
+                }
+            })},
+            {"activePromptId", "default"}
         }}
     };
 
@@ -171,7 +193,7 @@ bool Config::write(const std::string& name, json content, bool saveImmediately) 
 }
 
 bool Config::_update(json& data) {
-    if (!data.contains("version") && data.at("version") == VERSION_CONFIG) {
+    if (!data.contains("version") || data.at("version") == VERSION_CONFIG) {
         return false;
     }
     info("Configuration file is being updated...");
@@ -226,7 +248,37 @@ bool Config::_update(json& data) {
         }
 
         // v130 -> v131
-        // TODO.
+        if (data["version"] < 131) {
+            if (data.contains("ai")) {
+                if (!data["ai"].contains("models") || !data["ai"]["models"].is_array()) {
+                    auto& cb                    = data["ai"]["chatbot"];
+                    data["ai"]["models"]        = json::array({
+                        json{{"id", cb.value("model", "deepseek-chat")},
+                             {"name", "DeepSeek Chat"},
+                             {"provider", "DeepSeek"},
+                             {"endpoint", cb.value("api_endpoint", "https://api.deepseek.com/v1/chat/completions")},
+                             {"modelId", cb.value("model", "deepseek-chat")},
+                             {"apiKey", cb.value("api_key", "")},
+                             {"temperature", cb.value("temperature", 0.7)},
+                             {"extraParams", ""}}
+                    });
+                    data["ai"]["activeModelId"] = cb.value("model", "deepseek-chat");
+                }
+                if (!data["ai"].contains("prompts") || !data["ai"]["prompts"].is_array()) {
+                    std::string defPrompt = "你是一个有用的助手，使用中文回复用户的问题。";
+                    if (data["ai"].contains("chatbot"))
+                        defPrompt = data["ai"]["chatbot"].value("default_prompt", defPrompt);
+                    data["ai"]["prompts"]        = json::array({
+                        json{{"id", "default"}, {"name", "通用助手"}, {"content", defPrompt}}
+                    });
+                    data["ai"]["activePromptId"] = "default";
+                }
+                // 迁移 streaming 到顶层
+                if (!data["ai"].contains("streaming") && data["ai"].contains("chatbot"))
+                    data["ai"]["streaming"] = data["ai"]["chatbot"].value("streaming", true);
+            }
+            data["version"] = 131;
+        }
 
     } catch (...) {
         return false;
@@ -282,7 +334,7 @@ bool Config::_fill_missing_defaults(json& target, const json& defaults) {
         const auto& key = it.key();
         if (!target.contains(key)) {
             target[key] = it.value();
-            changed = true;
+            changed     = true;
         } else if (it->is_object() && target[key].is_object()) {
             if (_fill_missing_defaults(target[key], *it)) {
                 changed = true;
@@ -290,6 +342,29 @@ bool Config::_fill_missing_defaults(json& target, const json& defaults) {
         }
     }
     return changed;
+}
+
+// 递归删除 target 中不在 reference（mDefaults）里的字段
+void Config::_strip_unknown_keys(json& target, const json& reference) {
+    if (!target.is_object() || !reference.is_object()) return;
+    std::vector<std::string> to_remove;
+    for (auto it = target.begin(); it != target.end(); ++it) {
+        if (!reference.contains(it.key())) {
+            to_remove.push_back(it.key());
+        } else if (it->is_object() && reference[it.key()].is_object()) {
+            _strip_unknown_keys(*it, reference[it.key()]);
+        }
+    }
+    for (const auto& key : to_remove) {
+        info("清洗配置：移除未知字段 '{}'", key);
+        target.erase(key);
+    }
+}
+
+bool Config::sanitize() {
+    _strip_unknown_keys(mData, mDefaults);
+    _fill_missing_defaults(mData, mDefaults);
+    return _save();
 }
 
 } // namespace mod

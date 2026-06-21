@@ -20,6 +20,10 @@ public:
 
     bool write(const std::string& name, json content, bool saveImmediately = true);
 
+    bool reload() { return _load(); }
+
+    bool sanitize();
+
 private:
     friend Singleton<Config>;
     explicit Config();
@@ -34,6 +38,8 @@ private:
     bool _update(json&);
 
     bool _fill_missing_defaults(json& target, const json& defaults);
+
+    void _strip_unknown_keys(json& target, const json& reference);
 };
 
 } // namespace mod

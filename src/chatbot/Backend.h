@@ -25,19 +25,38 @@ using json = nlohmann::json;
 
 namespace mod::chatbot {
 
+// 消息内容部分（多模态）
+struct MessagePart {
+    QString type;   // "text" | "image_url" | "input_audio"
+    QString text;   // type=text
+    QString url;    // type=image_url：HTTP URL 或 data:image/...;base64,...
+    QString data;   // type=input_audio：base64 音频数据
+    QString format; // type=input_audio：格式 (mp3/wav/ogg 等)
+};
+
+// 单条消息（纯文本或多模态）
+struct MessageData {
+    QString              role;          // "user" | "assistant" | "system" | "tool"
+    QString              content;       // 纯文本（无多模态时使用）
+    QVector<MessagePart> parts;         // 多模态内容（非空时优先于 content）
+    QString              toolCallId;    // role=tool 时
+    QString              toolCallsJson; // role=assistant 且有 tool_calls 时，原始 JSON 字符串
+
+    bool isMultimodal() const { return !parts.isEmpty(); }
+};
+
 // 单个会话的完整数据
 struct SessionData {
-    QString                          id;
-    QString                          title;
-    QString                          createdAt;
-    QString                          updatedAt;
-    QVector<QPair<QString, QString>> messages; // {role, content}
+    QString              id;
+    QString              title;
+    QString              createdAt;
+    QString              updatedAt;
+    QVector<MessageData> messages;
 };
 
 class ChatBot : public QObject, public Singleton<ChatBot>, private Logger {
     Q_OBJECT
 
-    // QML 属性：API 设置
     Q_PROPERTY(QString apiKey READ getApiKey WRITE setApiKey NOTIFY apiKeyChanged)
     Q_PROPERTY(QString apiEndpoint READ getApiEndpoint WRITE setApiEndpoint NOTIFY apiEndpointChanged)
     Q_PROPERTY(QString model READ getModel WRITE setModel NOTIFY modelChanged)
@@ -48,44 +67,56 @@ class ChatBot : public QObject, public Singleton<ChatBot>, private Logger {
     Q_PROPERTY(QVariantList messages READ getMessages NOTIFY messagesChanged)
     Q_PROPERTY(QString currentSessionId READ getCurrentSessionId NOTIFY sessionSwitched)
 
+    // 当前活动模型的能力标志（只读，随模型切换更新）
+    Q_PROPERTY(bool capText READ getCapText NOTIFY activeModelCapabilitiesChanged)
+    Q_PROPERTY(bool capVision READ getCapVision NOTIFY activeModelCapabilitiesChanged)
+    Q_PROPERTY(bool capAudio READ getCapAudio NOTIFY activeModelCapabilitiesChanged)
+    Q_PROPERTY(bool capToolCall READ getCapToolCall NOTIFY activeModelCapabilitiesChanged)
+    Q_PROPERTY(bool capReasoning READ getCapReasoning NOTIFY activeModelCapabilitiesChanged)
+
 public:
-    // 可供 QML 调用的方法
+    // 基础接口
     Q_INVOKABLE void    sendMessage(const QString& message, const QString& fileRefs = QString());
-    Q_INVOKABLE bool    isAvailable();                                     // 检查是否已配置必要设置
-    Q_INVOKABLE void    reloadConfig();                                    // 重载配置
-    Q_INVOKABLE void    clearHistory();                                    // 清除历史记录
-    Q_INVOKABLE void    saveMessages();                                    // 保存聊天记录
-    Q_INVOKABLE QString markdownToHtml(const QString& markdown);           // 将 Markdown 文本转换为 HTML
-    Q_INVOKABLE void    truncateHistory(int index);                        // 截断历史记录到指定索引
-    Q_INVOKABLE void    editMessage(int index, const QString& newContent); // 编辑指定索引的消息
-    Q_INVOKABLE void    deleteMessage(int index);                          // 删除指定索引的单条消息
-    Q_INVOKABLE void    regenerateMessage(int index);                      // 重新生成指定索引的 AI 消息
+    Q_INVOKABLE void    sendMessageWithMedia(const QString& message, const QString& mediaParts);
+    Q_INVOKABLE bool    isAvailable();
+    Q_INVOKABLE void    reloadConfig();
+    Q_INVOKABLE void    sanitizeConfig();
+    Q_INVOKABLE void    clearHistory();
+    Q_INVOKABLE void    saveMessages();
+    Q_INVOKABLE QString markdownToHtml(const QString& markdown);
+    Q_INVOKABLE void    truncateHistory(int index);
+    Q_INVOKABLE void    editMessage(int index, const QString& newContent);
+    Q_INVOKABLE void    deleteMessage(int index);
+    Q_INVOKABLE void    regenerateMessage(int index);
 
-    // --- 多会话管理接口 ---
-    Q_INVOKABLE QString      getSessions();         // 返回所有会话的 JSON 字符串（不含消息内容，仅摘要）
-    Q_INVOKABLE QString      getCurrentSessionId(); // 返回当前活动会话的 ID
-    Q_INVOKABLE bool         switchSession(const QString& sessionId);         // 切换到指定会话
-    Q_INVOKABLE QString      createSession(const QString& title = QString()); // 创建新会话，返回新会话 ID
-    Q_INVOKABLE bool         deleteSession(const QString& sessionId);         // 删除指定会话
-    Q_INVOKABLE bool         renameSession(const QString& sessionId, const QString& newTitle); // 重命名会话
-    Q_INVOKABLE QVariantList getSessionMessages(const QString& sessionId);                     // 获取指定会话的消息列表
+    // Tool Call 接口
+    Q_INVOKABLE void submitToolResult(const QString& toolCallId, const QString& toolName, const QString& result);
 
-    // --- 多模型管理接口 (ChatBox 风格) ---
-    Q_INVOKABLE QString getModels();                            // 返回所有模型的 JSON 字符串
-    Q_INVOKABLE bool    addModel(const QString& modelJson);     // 添加/更新模型
-    Q_INVOKABLE bool    removeModel(const QString& modelId);    // 删除指定模型
-    Q_INVOKABLE bool    setActiveModel(const QString& modelId); // 切换活动模型
-    Q_INVOKABLE QString getActiveModel();                       // 返回当前活动模型信息的 JSON 字符串
-    Q_INVOKABLE bool    loadModelsFile();                       // 从磁盘重新加载 models.json
+    // 多会话管理
+    Q_INVOKABLE QString      getSessions();
+    Q_INVOKABLE QString      getCurrentSessionId();
+    Q_INVOKABLE bool         switchSession(const QString& sessionId);
+    Q_INVOKABLE QString      createSession(const QString& title = QString());
+    Q_INVOKABLE bool         deleteSession(const QString& sessionId);
+    Q_INVOKABLE bool         renameSession(const QString& sessionId, const QString& newTitle);
+    Q_INVOKABLE QVariantList getSessionMessages(const QString& sessionId);
 
-    // --- 多提示词管理接口 ---
-    Q_INVOKABLE QString getPrompts();                             // 返回所有提示词的 JSON 字符串
-    Q_INVOKABLE bool    addPrompt(const QString& promptJson);     // 添加/更新提示词
-    Q_INVOKABLE bool    removePrompt(const QString& promptId);    // 删除指定提示词
-    Q_INVOKABLE bool    setActivePrompt(const QString& promptId); // 切换活动提示词
-    Q_INVOKABLE QString getActivePrompt();                        // 返回当前活动提示词信息的 JSON 字符串
+    // 多模型管理
+    Q_INVOKABLE QString getModels();
+    Q_INVOKABLE bool    addModel(const QString& modelJson);
+    Q_INVOKABLE bool    removeModel(const QString& modelId);
+    Q_INVOKABLE bool    setActiveModel(const QString& modelId);
+    Q_INVOKABLE QString getActiveModel();
+    Q_INVOKABLE bool    loadModelsFile();
 
-    // 设置获取器
+    // 多提示词管理
+    Q_INVOKABLE QString getPrompts();
+    Q_INVOKABLE bool    addPrompt(const QString& promptJson);
+    Q_INVOKABLE bool    removePrompt(const QString& promptId);
+    Q_INVOKABLE bool    setActivePrompt(const QString& promptId);
+    Q_INVOKABLE QString getActivePrompt();
+
+    // Getter/Setter
     QString      getApiKey() const;
     QString      getApiEndpoint() const;
     QString      getModel() const;
@@ -94,7 +125,12 @@ public:
     bool         getIsStreaming() const;
     QVariantList getMessages() const;
 
-    // 设置器（带信号）
+    bool getCapText() const { return m_capText; }
+    bool getCapVision() const { return m_capVision; }
+    bool getCapAudio() const { return m_capAudio; }
+    bool getCapToolCall() const { return m_capToolCall; }
+    bool getCapReasoning() const { return m_capReasoning; }
+
     void setApiKey(const QString& key);
     void setApiEndpoint(const QString& endpoint);
     void setModel(const QString& model);
@@ -103,12 +139,13 @@ public:
     void setIsStreaming(bool streaming);
 
 signals:
-    // QML 通信信号
     void messageReceived(const QString& content, bool isComplete = true);
     void streamStart();
     void streamChunk(const QString& content);
     void streamEnd();
     void errorOccurred(const QString& error);
+    // Tool Call 信号：toolCallsJson 为完整 tool_calls 数组的 JSON 字符串
+    void toolCallReceived(const QString& toolCallsJson);
     void apiKeyChanged();
     void apiEndpointChanged();
     void modelChanged();
@@ -116,26 +153,19 @@ signals:
     void defaultPromptChanged();
     void isStreamingChanged();
     void messagesChanged();
-
-    // 模型管理信号
     void modelsChanged();
-
-    // 提示词管理信号
     void promptsChanged();
-
-    // 会话管理信号
     void sessionsChanged();
     void sessionSwitched(const QString& sessionId);
+    void activeModelCapabilitiesChanged();
 
 private:
     friend Singleton<ChatBot>;
-    explicit ChatBot(); // 构造函数
+    explicit ChatBot();
 
-    // 网络基础设施
     QNetworkAccessManager* m_networkManager;
-    QList<QNetworkReply*>  m_activeReplies; // 跟踪活动的网络请求
+    QList<QNetworkReply*>  m_activeReplies;
 
-    // 配置
     QString m_apiKey;
     QString m_apiEndpoint;
     QString m_model;
@@ -143,45 +173,58 @@ private:
     QString m_defaultPrompt;
     bool    m_isStreaming;
 
-    // 对话历史 - 当前会话的消息
-    QVector<QPair<QString, QString>>&       currentMessages();
-    const QVector<QPair<QString, QString>>& currentMessages() const;
-    static const int                        MAX_HISTORY_SIZE = 100; // 每个会话最多保留 100 条消息对
+    // 当前活动模型的额外请求体参数（JSON object 字符串）
+    json m_extraParams;
 
-    // 多会话管理
-    QMap<QString, SessionData> m_sessions;         // 所有会话，key 为 sessionId
-    QString                    m_currentSessionId; // 当前活动会话 ID
-    QString                    m_sessionsPath;     // sessions.json 路径
+    // 当前活动模型的能力标志
+    bool m_capText        = true;
+    bool m_capVision      = false;
+    bool m_capAudio       = false;
+    bool m_capToolCall    = false;
+    bool m_capReasoning   = false;
+    int  m_maxContextSize = 0;
 
-    void    initSessions();         // 初始化会话数据（加载或创建默认）
-    void    saveSessions();         // 保存 sessions.json 到磁盘
-    QString sessionsFilePath();     // 获取 sessions.json 路径
-    void    ensureCurrentSession(); // 确保存在一个当前会话
+    QVector<MessageData>&       currentMessages();
+    const QVector<MessageData>& currentMessages() const;
+    static const int            MAX_HISTORY_SIZE = 100;
 
-    // 网络请求方法
+    // 会话管理
+    QMap<QString, SessionData> m_sessions;
+    QString                    m_currentSessionId;
+    QString                    m_sessionsPath;
+
+    void    initSessions();
+    void    saveSessions();
+    QString sessionsFilePath();
+    void    ensureCurrentSession();
+
+    // 将 MessageData 序列化为 OpenAI API 格式的 QJsonObject
+    QJsonObject messageToJson(const MessageData& msg) const;
+    // 将当前历史（加 system prompt）组装为 API messages 数组
+    QJsonArray buildApiMessages(const QVector<MessageData>& history,
+                                const QString&              userText,
+                                const QVector<MessagePart>& userParts = {});
+
     void makeApiRequest(const QJsonArray& messages);
     void handleNetworkReply(QNetworkReply* reply, bool isStream);
 
-    // 流式传输支持
     QString m_currentStreamBuffer;
-    QString m_responseBuffer; // 用于累积响应数据，处理不完整的 SSE 行
+    QString m_responseBuffer;
+    // 流式 tool_calls 累积缓冲（按 index 存储各工具调用的片段）
+    QMap<int, json> m_toolCallsBuffer;
 
     // 多模型管理
-    json    m_modelsData; // 完整的 models.json 数据
-    QString m_modelsPath; // models.json 的完整路径
+    json m_modelsData;
 
-    void    initModels();                           // 初始化模型数据（加载或创建默认）
-    void    saveModels();                           // 保存 models.json 到磁盘
-    QString modelsFilePath();                       // 获取 models.json 路径
-    void    applyModelConfig(const json& modelObj); // 将模型配置应用到当前会话
+    void initModels();
+    void saveModels();
+    void applyModelConfig(const json& modelObj);
 
     // 多提示词管理
-    json    m_promptsData; // 完整的 prompts.json 数据
-    QString m_promptsPath; // prompts.json 的完整路径
+    json m_promptsData;
 
-    void    initPrompts();     // 初始化提示词数据（加载或创建默认）
-    void    savePrompts();     // 保存 prompts.json 到磁盘
-    QString promptsFilePath(); // 获取 prompts.json 路径
+    void initPrompts();
+    void savePrompts();
 };
 
 } // namespace mod::chatbot
