@@ -1118,6 +1118,15 @@ bool ChatBot::addModel(const QString& modelJson) {
     }
     if (!updated) m_modelsData["models"].push_back(newModel);
 
+    // 若更新的是当前活动模型，立即重新应用配置
+    if (updated && m_modelsData.value("activeModelId", "") == id) {
+        applyModelConfig(newModel);
+        emit apiEndpointChanged();
+        emit apiKeyChanged();
+        emit modelChanged();
+        emit temperatureChanged();
+    }
+
     saveModels();
     emit modelsChanged();
     info("模型已{}: {}", updated ? "更新" : "添加", id);
