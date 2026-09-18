@@ -489,8 +489,9 @@ namespace mod::filemanager {
 bool MusicPlayer::mIsTakeOver{false};
 
 MusicPlayer::MusicPlayer() : Logger("MusicPlayer") {
-    const auto cfg = Config::getInstance().read("fm");
-    mPauseOnScan   = cfg.value("pause_on_scan", false);
+    const auto cfg      = Config::getInstance().read("fm");
+    mPauseOnScan        = cfg.value("pause_on_scan", false);
+    mHideFloatingWindow = cfg.value("hide_floating_window", false);
 
     connect(&Event::getInstance(), &Event::beforeUiInitialization, [this](QQuickView& view, QQmlContext* context) {
         context->setContextProperty("musicPlayer", this);
@@ -582,12 +583,54 @@ void MusicPlayer::setPauseOnScan(bool enabled) {
     emit pauseOnScanChanged();
 }
 
+bool MusicPlayer::getHideFloatingWindow() const { return mHideFloatingWindow; }
+
+void MusicPlayer::setHideFloatingWindow(bool hidden) {
+    if (mHideFloatingWindow == hidden) {
+        return;
+    }
+    mHideFloatingWindow         = hidden;
+    auto cfg                    = Config::getInstance().read("fm");
+    cfg["hide_floating_window"] = hidden;
+    Config::getInstance().write("fm", std::move(cfg));
+    emit hideFloatingWindowChanged();
+}
+
 // 扫描时暂停：外部播放器是独立进程，无法在扫描开始时暂停它，保持无操作。
 void MusicPlayer::onOcrStarted() {}
+
+// 以下扫描暂停保护接口在外部播放器路由下没有对应的暂停会话，全部保持无操作/默认值。
+int64_t MusicPlayer::normalizePositionDuringScan(int64_t requestedPosition) { return requestedPosition; }
+
+void MusicPlayer::restoreScanPausePosition() {}
+
+void MusicPlayer::onPlaybackResumedAfterScan() {}
+
+bool MusicPlayer::shouldPreserveMusicOnScanResultClose() { return false; }
+
+void MusicPlayer::finishScanPause() {}
+
+// 外部播放器为独立进程，暂无进度控制通道，定位请求不生效。
+void MusicPlayer::seekToPosition(qint64 position) {
+    warn("seekToPosition({}) is not supported by the external player route", position);
+}
+
+void MusicPlayer::stop() {
+    emit stopRequested();
+    if (!mIsTakeOver) {
+        return;
+    }
+    mCurrentPlaying.mIsEnd = true;
+    mIsTakeOver            = false;
+    info("stop: terminating the external player process");
+    exec(QStringLiteral("killall VideoPlayer"));
+}
 
 void MusicPlayer::releaseAudio() {
     info("QML 请求释放 MUSIC 引用（外部播放器路由：无操作）");
 }
+
+void MusicPlayer::releaseAudioAfterHide() { releaseAudio(); }
 
 void MusicPlayer::cleanupTempSymlinks() {
     // 外部播放器按内容探测格式，无需 .mp3 后缀软链接。

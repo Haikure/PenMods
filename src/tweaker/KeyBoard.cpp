@@ -138,7 +138,11 @@ PEN_HOOK(uint64, _ZN11YSystemBase8ocrStartEv, uint64 self, uint64 a2, uint64 a3,
 }
 #else
 PEN_HOOK(uint64, _ZN11YSystemBase8ocrStartEv, uint64 self) {
-    emit mod::Event::getInstance().ocrStarted();
+    const bool isButtonRelease =
+        PEN_CALL(bool, "_ZNK11YSystemBase15isButtonReleaseEv", void*)(reinterpret_cast<void*>(self));
+    if (!isButtonRelease) {
+        emit mod::Event::getInstance().ocrStarted();
+    }
     if (shouldBlockScan()) {
         return false;
     }
