@@ -22,6 +22,9 @@ class MusicPlayer : public QObject, public Singleton<MusicPlayer>, private Logge
     Q_OBJECT
 
     Q_PROPERTY(bool pauseOnScan READ getPauseOnScan WRITE setPauseOnScan NOTIFY pauseOnScanChanged);
+    Q_PROPERTY(
+        bool hideFloatingWindow READ getHideFloatingWindow WRITE setHideFloatingWindow NOTIFY hideFloatingWindowChanged
+    );
 
 public:
     void play(size_t idx);
@@ -40,17 +43,38 @@ public:
 
     static bool mIsTakeOver;
 
+    [[nodiscard]] bool isPausedByScan() const { return mPausedByScan; }
+    int64_t            normalizePositionDuringScan(int64_t requestedPosition);
+    void                  onPlaybackResumedAfterScan();
+    Q_INVOKABLE bool      isScanPauseActive() const { return mPausedByScan; }
+    Q_INVOKABLE bool      shouldPreserveMusicOnScanResultClose();
+    Q_INVOKABLE void      finishScanPause();
+
     [[nodiscard]] bool getPauseOnScan() const;
     void setPauseOnScan(bool enabled);
 
-    /// 供 QML 调⽤：释放当前 MUSIC 引⽤（播放停⽌/关闭播放器时）
+    [[nodiscard]] bool getHideFloatingWindow() const;
+    void setHideFloatingWindow(bool hidden);
+
+    /// 供 QML 调用：将当前音频定位到指定的毫秒位置
+    Q_INVOKABLE void seekToPosition(qint64 position);
+
+    /// 供 QML 调用：终止当前音乐并释放播放器状态
+    Q_INVOKABLE void stop();
+
+    /// 供 QML 调用：释放当前 MUSIC 引用（播放停止/关闭播放器时）
     Q_INVOKABLE void releaseAudio();
+
+    /// 页面导航隐藏播放器时，保留由扫描暂停的播放会话
+    Q_INVOKABLE void releaseAudioAfterHide();
 
     /// 清理当前临时软链接
     void cleanupTempSymlinks();
 
 signals:
     void pauseOnScanChanged();
+    void hideFloatingWindowChanged();
+    void stopRequested();
 
 private:
     friend Singleton<MusicPlayer>;
@@ -79,7 +103,13 @@ private:
     // 临时软链接路径，用于清理
     QString mTempAudioLink;
     bool    mPauseOnScan{false};
+    bool    mHideFloatingWindow{false};
+    bool    mPausedByScan{false};
+    bool    mPlaybackResumedDuringScan{false};
+    bool    mScanResultClosed{false};
+    int64_t mScanPausePosition{0};
 
     void onOcrStarted();
+    void restoreScanPausePosition();
 };
 } // namespace mod::filemanager
