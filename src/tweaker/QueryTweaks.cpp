@@ -54,18 +54,19 @@ void QueryTweaks::setTypeByHand(bool val) {
 PEN_HOOK(
     uint64,
     _ZN14YResultManager11entryResultERK7QStringS2_S2_N12YEnumWrapper9PageIndexEib,
-    uint64  self,
-    QString what,
-    uint64  a3,
-    uint64  a4,
-    uint64  a5,
-    int     a6,
-    bool    a7
+    uint64       self,
+    QString const& what,
+    uint64       a3,
+    uint64       a4,
+    uint64       a5,
+    int          a6,
+    bool         a7
 ) {
-    auto &qt = mod::QueryTweaks::getInstance();
+    auto    &qt       = mod::QueryTweaks::getInstance();
+    QString normalized = what;
     if (qt.getLowerScan()) {
-        what = what.toLower();
+        normalized = normalized.toLower();
     }
-    what.replace(QRegularExpression(QStringLiteral(" {2,}")), QStringLiteral(" "));
-    return origin(self, what, a3, a4, a5, a6, a7);
+    normalized.replace(QRegularExpression(QStringLiteral(" {2,}")), QStringLiteral(" "));
+    return origin(self, normalized, a3, a4, a5, a6, a7);
 }

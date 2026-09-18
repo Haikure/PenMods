@@ -92,8 +92,15 @@ PEN_HOOK(uint64, _ZN7YGlobal14showSpeechPageEv, uint64 self) {
 
 static bool shouldBlockScan() {
 #if PL_BUILD_YDP02X
-    bool inputPageShowing = PEN_CALL(bool, "_ZNK7YGlobal16inputPageShowingEv", void*)(mod::YPointer<YGlobal>::getInstance());
+    auto* global = mod::YPointer<YGlobal>::getInstance();
+    auto* isInputPageShowing = PEN_SYM("_ZNK7YGlobal16inputPageShowingEv");
+    const bool inputPageShowing = global && isInputPageShowing
+        && reinterpret_cast<bool (*)(void*)>(isInputPageShowing)(global);
     return inputPageShowing || mod::KeyBoard::getInstance().autoSendScan();
+#elif PL_BUILD_YDP03X
+    // Only custom PenMods input pages should consume scan events. The QWE widget state
+    // is owned by the original application and can remain active during normal scans.
+    return mod::KeyBoard::getInstance().inputPageShowing();
 #else
     return mod::KeyBoard::getInstance().inputPageShowing();
 #endif
