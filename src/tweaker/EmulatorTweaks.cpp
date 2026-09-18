@@ -16,6 +16,14 @@
 
 using namespace mod;
 
+#if PL_BUILD_YDP02X
+#define PEN_QEMU_SKU     "OVERHEAD_D2_SKU_EXA_ADV"
+#define PEN_QEMU_VERSION "2.1.2"
+#else
+#define PEN_QEMU_SKU     "OVERHEAD_D3_SKU_CHN_STD"
+#define PEN_QEMU_VERSION "2.7.3"
+#endif
+
 // from: librkdev.so
 // return value:
 //   OK    0
@@ -28,10 +36,10 @@ PEN_HOOK(int64_t, _console_run, const char* cmd, char* result) {
         strcpy(result, "0");
         break;
     case H("vendor_storage -r VENDOR_CUSTOM_ID_0E -t string | awk '{print $NF}'"):
-        strcpy(result, "OVERHEAD_D2_SKU_EXA_ADV");
+        strcpy(result, PEN_QEMU_SKU);
         break;
     case H("load_sys_cfg sku"):
-        strcpy(result, "OVERHEAD_D2_SKU_EXA_ADV");
+        strcpy(result, PEN_QEMU_SKU);
         break;
     case H("load_sys_cfg brightness"):
         strcpy(result, "99");
@@ -43,7 +51,7 @@ PEN_HOOK(int64_t, _console_run, const char* cmd, char* result) {
         strcpy(result, "30");
         break;
     case H("cat /Version | grep Version | awk '{print $2}'"):
-        strcpy(result, "2.1.2");
+        strcpy(result, PEN_QEMU_VERSION);
         break;
     case H("/bin/uname -r"):
         strcpy(result, "4.4.159");
@@ -65,36 +73,84 @@ PEN_HOOK(int64_t, _console_run, const char* cmd, char* result) {
 // from: librkdev.so
 // result value:
 //   OK 0
-PEN_HOOK(int64_t, get_battery_info, int& result_capacity, bool& result_charging) {
+PEN_HOOK(int64_t, get_battery_info,
+#if PL_BUILD_YDP02X
+    int& result_capacity, bool& result_charging
+#else
+    int* capacity, bool* charging
+#endif
+) {
+#if PL_BUILD_YDP02X
     result_capacity = 100;
     result_charging = true;
+#else
+    if (capacity) *capacity = 100;
+    if (charging) *charging = true;
+#endif
     return 0;
 }
 
 // network
 
-PEN_HOOK(int64_t, get_wifi_status, WifiStatus& result) {
+PEN_HOOK(int64_t, get_wifi_status,
+#if PL_BUILD_YDP02X
+    WifiStatus& result
+#else
+    void* status
+#endif
+) {
+#if PL_BUILD_YDP02X
     result.mEnabled            = true;
     result.mIsConnected        = true;
     result.mIsNetworkAvailable = true;
     strcpy(result.mSSID, "Emulator Environment");
     result.mSignal = 100;
+#else
+    // YDP03X: WifiStatus layout is only partially verified; the stub writes no
+    // fields to avoid clobbering the caller's stack.
+    (void)status;
+#endif
     return 0;
 }
 
-PEN_HOOK(int64_t, wifi_scan, char* deviceList, uint32& deviceCount) {
+PEN_HOOK(int64_t, wifi_scan,
+#if PL_BUILD_YDP02X
+    char* deviceList, uint32& deviceCount
+#else
+    void
+#endif
+) {
+#if PL_BUILD_YDP02X
     strcpy(deviceList, "Emulator Environment");
     deviceCount = 1;
+#endif
     return 0;
 }
 
-PEN_HOOK(int64_t, set_wifi_onoff, bool onoff) { return 0; }
+PEN_HOOK(int64_t, set_wifi_onoff,
+#if PL_BUILD_YDP02X
+    bool onoff
+#else
+    int onoff
+#endif
+) {
+    return 0;
+}
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(int64_t, wifi_connect, const char* a1, const char* a2) { return 0; }
 
 PEN_HOOK(int64_t, wifi_disconnect, const char* onoff) { return 0; }
 
 PEN_HOOK(int64_t, wifi_remove, const char* onoff) { return 0; }
+#else
+// YDP03X librkdev exposes additional C API stubs for the emulator.
+PEN_HOOK(int64_t, get_audio_dev_type) { return 3; } // 3 = digital headset
+PEN_HOOK(void, led_init, int gpio) { (void)gpio; }
+PEN_HOOK(void, led_on) {}
+PEN_HOOK(void, led_off) {}
+PEN_HOOK(int, _get_led_gpio, int id) { return id; }
+#endif
 
 
 // block sound play
@@ -121,6 +177,7 @@ PEN_HOOK(uint32, _ZN12YSoundCenter12playFileDataERK7QString, void* self, QString
 
 // relocation database
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(void*, _ZN8Database17ConnectionManager15setDatabaseNameERK7QString, void* self, QString const& path) {
     QString newPath = path;
     if (path.startsWith("/userdisk/database/")) {
@@ -129,6 +186,10 @@ PEN_HOOK(void*, _ZN8Database17ConnectionManager15setDatabaseNameERK7QString, voi
     spdlog::warn("{} database path: {}", newPath == path ? "setting" : "INTERRUPTED", newPath.toStdString());
     return origin(self, newPath);
 }
+#else
+// YDP03X: Database::ConnectionManager::setDatabaseName does not exist; DB paths are
+// hard-coded to /userdisk/database/*.db, so no redirection hook is needed.
+#endif
 
 // device
 

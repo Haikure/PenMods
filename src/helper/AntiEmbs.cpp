@@ -159,6 +159,10 @@ void AntiEmbs::setFastHide(bool val) {
 
 } // namespace mod
 
+// 二代蓝牙状态回调为 bool 参数；三代为携带 JSON 字符串（method/state/profile）的 QString，
+// 蓝牙关闭（"method":"close"）时若开启防尴尬自动静音则把音量归零。
+// 三代 setSpkVolume 为 (int, int) 双参签名。
+#if PL_BUILD_YDP02X
 PEN_HOOK(uint64, _ZN17YBlueToothManager17onBtStatusChangedEb, uint64 self, bool a2) {
     if (!a2 && mod::AntiEmbs::getInstance().getAutoMute()) {
         PEN_CALL(void*, "_ZN15YSettingManager12setSpkVolumeEi", void*, int)
@@ -166,6 +170,16 @@ PEN_HOOK(uint64, _ZN17YBlueToothManager17onBtStatusChangedEb, uint64 self, bool 
     }
     return origin(self, a2);
 }
+#else
+PEN_HOOK(uint64, _ZN17YBlueToothManager17onBtStatusChangedE7QString, uint64 self, const QString& status) {
+    if (mod::AntiEmbs::getInstance().getAutoMute()
+        && status.contains(QStringLiteral("\"method\":\"close\""))) {
+        PEN_CALL(void*, "_ZN15YSettingManager12setSpkVolumeEii", void*, int, int)
+        (mod::YPointer<YSettingManager>::getInstance(), 0, 0);
+    }
+    return origin(self, status);
+}
+#endif
 
 PEN_HOOK(uint64, _ZN15YSettingManager16setAutoPronounceEb, uint64 self, bool a2) {
     if (mod::AntiEmbs::getInstance().getAutoPronLocked()) {

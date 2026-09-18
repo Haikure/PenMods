@@ -6,6 +6,8 @@
 
 #include "filemanager/player/MusicPlayer.h"
 
+#if PL_BUILD_YDP02X
+
 #include "base/YPointer.h"
 
 #include "common/Event.h"
@@ -315,3 +317,139 @@ PEN_HOOK(void*, _ZN19YMediaPlayerManager10onSoundEndEj, void* self, uint32 a2) {
 
 // 系统清理播放数据时，同步清理临时软链接
 PEN_HOOK(void*, _ZN19YMediaPlayerManager8wipeDataEv, void* self) { return origin(self); }
+
+#else
+
+// YDP03X: music playback is routed to the external player /userdisk/VideoPlayer,
+// mirroring the verified PenMods3 port. No native YMediaPlayerManager symbols are
+// used (their YDP02X shapes are not guaranteed on YDP03X), so this builds a
+// self-contained route via QProcess and keeps the same QML-visible interface.
+
+#include "common/Event.h"
+#include "common/Utils.h"
+
+#include "mod/Config.h"
+
+#include <QQmlContext>
+#include <QProcess>
+#include <QRandomGenerator>
+
+#include <optional>
+
+namespace mod::filemanager {
+
+bool MusicPlayer::mIsTakeOver{false};
+
+MusicPlayer::MusicPlayer() : Logger("MusicPlayer") {
+    const auto cfg = Config::getInstance().read("fm");
+    mPauseOnScan   = cfg.value("pause_on_scan", false);
+
+    connect(&Event::getInstance(), &Event::beforeUiInitialization, [this](QQuickView& view, QQmlContext* context) {
+        context->setContextProperty("musicPlayer", this);
+    });
+}
+
+void MusicPlayer::play(size_t idx) {
+    if (idx > mPlayList.size() - 1) {
+        warn("play: index {} out of range (size={})", idx, mPlayList.size());
+        return;
+    }
+    auto file = mPlayList.at(idx);
+    if (!mCurrentPlaying.mIsEnd && mCurrentPlaying.mFile == file) {
+        return; // 已经在播同一首
+    }
+    mCurrentPlaying.setPlaying(idx);
+    _play(file);
+}
+
+void MusicPlayer::_play(const std::shared_ptr<QFileInfo>& file) {
+    mIsTakeOver              = true;
+    mCurrentPlaying.mFile    = file;
+    mCurrentPlaying.mIsEnd   = false;
+    info("external player play: {}", file->absoluteFilePath().toStdString());
+    QProcess::startDetached(QStringLiteral("/userdisk/VideoPlayer"), {file->absoluteFilePath()});
+}
+
+void MusicPlayer::clickNext() {
+    if (mPlayList.empty()) return;
+    auto newIdx = mCurrentPlaying.mIndex + 1;
+    if (newIdx > mPlayList.size() - 1) newIdx = 0;
+    play(newIdx);
+}
+
+void MusicPlayer::clickPrev() {
+    if (mPlayList.empty()) return;
+    auto newIdx = mCurrentPlaying.mIndex - 1;
+    if (newIdx > mPlayList.size() - 1) // overflow
+        newIdx = mPlayList.size() - 1;
+    play(newIdx); // back <- front
+}
+
+void MusicPlayer::clickRand() {
+    if (mPlayList.empty()) return;
+    std::optional<size_t> newIdx;
+    while (!newIdx) {
+        uint32 switched = QRandomGenerator::global()->bounded((int)mPlayList.size());
+        if (mCurrentPlaying.mIndex != switched || mPlayList.size() == 1) {
+            newIdx = switched;
+            break;
+        }
+    }
+    play(*newIdx);
+}
+
+// 外部播放器为独立进程，无原生 onSoundEnd 信号；由 QML / 后续 IPC 触发切歌。
+void MusicPlayer::onSoundEnd() {
+    if (mCurrentPlaying.mIsEnd) return;
+    switch (getCurrentAudioSequence()) {
+    case AudioSequence::ORDER:
+        clickNext();
+        break;
+    case AudioSequence::RANDOM:
+        clickRand();
+        break;
+    case AudioSequence::SINGLE:
+        play(mCurrentPlaying.mIndex);
+        break;
+    case AudioSequence::SINGLE_SHOT:
+    default:
+        mCurrentPlaying.mIsEnd = true;
+        break;
+    }
+}
+
+// 外部播放器路由下未接管原生设置项，默认顺序播放。
+AudioSequence MusicPlayer::getCurrentAudioSequence() { return AudioSequence::ORDER; }
+
+bool MusicPlayer::getPauseOnScan() const { return mPauseOnScan; }
+
+void MusicPlayer::setPauseOnScan(bool enabled) {
+    if (mPauseOnScan == enabled) {
+        return;
+    }
+    mPauseOnScan         = enabled;
+    auto cfg             = Config::getInstance().read("fm");
+    cfg["pause_on_scan"] = enabled;
+    Config::getInstance().write("fm", std::move(cfg));
+    emit pauseOnScanChanged();
+}
+
+// 扫描时暂停：外部播放器是独立进程，无法在扫描开始时暂停它，保持无操作。
+void MusicPlayer::onOcrStarted() {}
+
+void MusicPlayer::releaseAudio() {
+    info("QML 请求释放 MUSIC 引用（外部播放器路由：无操作）");
+}
+
+void MusicPlayer::cleanupTempSymlinks() {
+    // 外部播放器按内容探测格式，无需 .mp3 后缀软链接。
+}
+
+QString MusicPlayer::createTempSymlinks(const PlayFile& file, QString& outLrcPath) {
+    outLrcPath.clear();
+    return file->absoluteFilePath();
+}
+
+} // namespace mod::filemanager
+
+#endif

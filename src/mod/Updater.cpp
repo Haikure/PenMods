@@ -49,7 +49,7 @@ bool Version::operator>(const Version b) const { return toNumber() > b.toNumber(
 bool Version::operator<(const Version b) const { return toNumber() < b.toNumber(); }
 
 void Updater::check() {
-
+#if PL_BUILD_YDP02X
     info("Starting to check update...");
     auto power = PEN_CALL(uint32, "_ZN15YBatteryManager5powerEv", void*)(YPointer<YBatteryManager>::getInstance());
     if (power < 10) {
@@ -143,12 +143,18 @@ void Updater::check() {
             }
         }
     );
+#else
+    // YDP03X: this port does not configure an OTA source. Report latest and skip
+    // the low-battery gate / network request entirely.
+    _setLatestVersion(mInfo.mCurrentStr);
+    _setOtaStatus(LATEST_VERSION);
+#endif
 }
 
 Updater::UpdateInfo& Updater::getInfo() { return mInfo; }
 
 void Updater::download() {
-
+#if PL_BUILD_YDP02X
     _setOtaStatus(DOWNLOADING);
     Downloader::getInstance().createTask(
         QString::fromStdString(mLatestObject["download"]),
@@ -162,10 +168,13 @@ void Updater::download() {
             }
         }
     );
+#else
+    // YDP03X: no downloadable package.
+#endif
 }
 
 void Updater::install() {
-
+#if PL_BUILD_YDP02X
     _setOtaStatus(MD5_CHECKING);
     if (_calcFileMd5(UH_TEMP_PATH "download.temp")
         != QString::fromStdString(mLatestObject["md5"]).toLower().toStdString()) {
@@ -187,13 +196,27 @@ void Updater::install() {
             }
         }
     }
+#else
+    // YDP03X: installation is intercepted (no-op on this port).
+#endif
 }
 
 void Updater::onUiCompleted() {
-
+#if PL_BUILD_YDP02X
     _cleanupTemp();
 
     _setCurrentVersion(mSelfVersion.toString());
+#else
+    // YDP03X: current version comes from the system /Version (matching the stock
+    // read path). Fall back to a fixed value if the command is stubbed/unavailable.
+    auto version = exec("cat /Version | grep Version | awk '{print $2}'");
+    if (version.empty()) {
+        version = "2.7.3";
+    }
+    _setCurrentVersion(QString::fromStdString(version));
+    _setLatestVersion(QString::fromStdString(version));
+    _setOtaStatus(LATEST_VERSION);
+#endif
 }
 
 std::string Updater::_calcFileMd5(const QString& path) {
@@ -256,6 +279,21 @@ PEN_HOOK(UpdateStatus, _ZN14YUpdateManager9otaStatusEv, uint64) {
 PEN_HOOK(QString, _ZN14YUpdateManager10updateNoteEv, uint64 self, void* a2, void* a3) {
     return mod::Updater::getInstance().getInfo().mUpdateNote;
 }
+
+#if PL_BUILD_YDP03X
+// YDP03X-only getters (the setting page reads these to show download/install state).
+PEN_HOOK(double, _ZN14YUpdateManager13updateImgSizeEv, void* self) {
+    return mod::Updater::getInstance().getInfo().mPackageSize;
+}
+
+PEN_HOOK(uint32, _ZN14YUpdateManager16downloadProgressEv, void* self) {
+    return mod::Updater::getInstance().getInfo().mDownloadProgress;
+}
+
+PEN_HOOK(uint32, _ZN14YUpdateManager15installProgressEv, void* self) {
+    return mod::Updater::getInstance().getInfo().mInstallProgress;
+}
+#endif
 
 // Disabled Functions;
 

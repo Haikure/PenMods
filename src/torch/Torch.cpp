@@ -13,6 +13,13 @@
 
 #if PL_BUILD_YDP02X
 constexpr auto LED_DEFAULT_GPIO_ID = 15;
+#else
+// 三代（YDP03X）LED 控制由 librkdev.so 提供：led_init(int gpio) 后接无参 led_on()/led_off()。
+namespace {
+constexpr int LED_DEFAULT_GPIO_ID = 15;
+using LedInitFn  = void (*)(int);
+using LedOnOffFn = void (*)();
+} // namespace
 #endif
 
 namespace mod {
@@ -30,10 +37,24 @@ void Torch::setStatus(bool stat) {
         if (stat) {
 #if PL_BUILD_YDP02X
             PEN_CALL(void*, "led_on", uint32)(LED_DEFAULT_GPIO_ID);
+#else
+            auto init = PEN_CALL(LedInitFn, "led_init", int);
+            if (init) {
+                init(LED_DEFAULT_GPIO_ID);
+            }
+            auto on = PEN_CALL(LedOnOffFn, "led_on");
+            if (on) {
+                on();
+            }
 #endif
         } else {
 #if PL_BUILD_YDP02X
             PEN_CALL(void*, "led_off", uint32)(LED_DEFAULT_GPIO_ID);
+#else
+            auto off = PEN_CALL(LedOnOffFn, "led_off");
+            if (off) {
+                off();
+            }
 #endif
         }
         emit statusChanged();

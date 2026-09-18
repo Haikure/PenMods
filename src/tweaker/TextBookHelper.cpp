@@ -57,10 +57,15 @@ void TextBookHelper::onUiCompleted() {
         } else if (QFile(zipPath).exists()) {
             // need to install.
             info("Try to install offline textbook, Id ==> {}.", id.toStdString());
+#if PL_BUILD_YDP02X
             auto dbPriv = *((uint64*)YPointer<YTextBookDb>::getInstance() + 2);
             PEN_CALL(void, "_ZN18YTextBookDbPrivate12unzipPackageERK7QString", uint64, QString)(dbPriv, zipPath);
             PEN_CALL(void, "_ZN18YTextBookDbPrivate19addDownloadedBlocksERK7QString", uint64, QString)
             (dbPriv, zipPath);
+#else
+            // TODO(YDP03X): offline textbook auto-install (YTextBookDbPrivate) is
+            // not ported; the manual install path is left to the stock UI.
+#endif
         } else {
             // not uploaded.
             continue;
@@ -84,6 +89,10 @@ void TextBookHelper::remove(const QString& book) {
 
 } // namespace mod
 
+// YDP02X: the YTextBookEntity layout offsets read by getBookId are unverified on
+// YDP03X, so the unlock hooks (and the setDownloadState enum change) are left to
+// the stock firmware on YDP03X.
+#if PL_BUILD_YDP02X
 inline QString getBookId(uint64 entity) { return *(QString*)((uint64*)entity + 3); }
 
 PEN_HOOK(uint64, _ZN15YTextBookEntity16setDownloadStateEN12YEnumWrapper14Download_StateE, uint64 self, uint32 a2) {
@@ -119,3 +128,4 @@ PEN_HOOK(uint64, _ZN16YTextBookManager6removeERK7QString, uint64 self, const QSt
     mod::TextBookHelper::getInstance().remove(book);
     return origin(self, book);
 }
+#endif

@@ -229,8 +229,18 @@ PEN_HOOK(void, _ZN11YLogManager20uploadUserRawScanImgEb, uint64 self, bool a2) {
 
 // Http Log
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(void, _ZN11YLogManager11sendHttpLogERK7QStringS2_, uint64 self, uint64 a2, uint64 a3) {
     if (!mod::LoggerMonitor::getInstance().getNoUploadHttplog()) {
         origin(self, a2, a3);
     }
 }
+#else
+// YDP03X 主程序里 YLogManager::sendHttpLog 只有单参版本：
+//   YLogManager::sendHttpLog(QString const&) → _ZN11YLogManager11sendHttpLogERK7QString
+PEN_HOOK(void, _ZN11YLogManager11sendHttpLogERK7QString, uint64 self, uint64 a2) {
+    if (!mod::LoggerMonitor::getInstance().getNoUploadHttplog()) {
+        origin(self, a2);
+    }
+}
+#endif

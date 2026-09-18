@@ -41,6 +41,7 @@ WordBookTweaks::WordBookTweaks() {
 
         // for tab-type phrase, fix wordCount;
         if (query.startsWith("SELECT count(*) FROM table_wordbook") && getPhraseTab()) {
+#if PL_BUILD_YDP02X
             auto tabType =
                 PEN_CALL(uint32, "_ZNK16YWordBookManager7tabTypeEv", void*)(YPointer<YWordBookManager>::getInstance());
             if (tabType == 2) {
@@ -48,6 +49,7 @@ WordBookTweaks::WordBookTweaks() {
             } else if (tabType == 3) {
                 query += " AND word LIKE '% %'";
             }
+#endif
         }
     });
 
@@ -57,6 +59,7 @@ WordBookTweaks::WordBookTweaks() {
 }
 
 void WordBookTweaks::doExport() {
+#if PL_BUILD_YDP02X
     showToast("正在导出单词本");
     // see xrefs for: YWordbookDB::loadAllWords()
     // line 41~45
@@ -68,9 +71,15 @@ void WordBookTweaks::doExport() {
             1
         );
     pickUpQuery = true;
+#else
+    // TODO(YDP03X): wordbook export reads YDP02X offsets and DictPenFeature flags;
+    // not ported to YDP03X.
+    showToast("导出功能暂未适配当前设备", "#E9900C");
+#endif
 }
 
 bool WordBookTweaks::exportFromQueryResult(uint64 queryResult) {
+#if PL_BUILD_YDP02X
     QFile file(WB_EXPORT_FILE);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         showToast("单词本导出失败，文件打开失败", "#E9900C");
@@ -137,6 +146,11 @@ bool WordBookTweaks::exportFromQueryResult(uint64 queryResult) {
     showToast("单词本导出成功");
     filemanager::FileManager::getInstance().setMtpOnoff(true);
     return true;
+#else
+    // TODO(YDP03X): the querySenior/queryOxford/queryPureEnglishAndExample signatures
+    // gained a trailing bool on YDP03X and DictPenFeature is YDP02X-only; not ported.
+    return false;
+#endif
 }
 
 bool WordBookTweaks::getExporting() const { return mExporting; }
@@ -180,6 +194,9 @@ PEN_HOOK(uint64, _ZN16YWordBookManager8wipeDataEb, uint64 self, bool a2) {
 
 // Phrase Tab
 
+// YDP02X: getLoadItemsCmd does not exist on YDP03X and the doExport hook writes
+// YDP02X offsets; both are guarded.
+#if PL_BUILD_YDP02X
 PEN_HOOK(
     QString,
     _ZNK18YWordbookDBPrivate15getLoadItemsCmdExN12YEnumWrapper13WordGroupTypeEiNS0_12LanguageTypeENS0_9ItemStateENS0_9SyncStateE,
@@ -229,3 +246,4 @@ PEN_HOOK(void, _ZN16YWordBookManager8doExportERKN8Database16AsyncQueryResultE, u
         mod::WordBookTweaks::getInstance().setExporting(false);
     }
 }
+#endif

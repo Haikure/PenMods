@@ -13,6 +13,9 @@
 
 #if PL_BUILD_YDP02X
 constexpr auto DESIGN_BATTERY_FULL = 1000.0;
+#else
+// 三代设计容量与二代一致（1000.0）。
+constexpr auto DESIGN_BATTERY_FULL = 1000.0;
 #endif
 
 namespace mod {
@@ -108,7 +111,7 @@ void BatteryInfo::update() {
     // Prediction
     auto    remaining = strtod(readFileNoLast("/sys/class/power_supply/battery/capacity").c_str(), nullptr) / 100.0;
     bool    charging  = readFileNoLast("/sys/class/power_supply/ac/status") == "Charging" && remaining < 1;
-    QString type      = charging ? "距离充满" : "预计可用";
+    QString type      = charging ? "充满" : "可用";
     QString duration;
 
     if (mA == 0 || (mA < 0 && charging) || (mA > 0 && !charging)) {
@@ -157,7 +160,17 @@ void BatteryInfo::setVoltage(const QString& mVoltage_) {
     }
 }
 
-QString BatteryInfo::getPrediction() const { return QString("%1: %2分钟").arg(mPrediction.type, mPrediction.duration); }
+QString BatteryInfo::getPrediction() const {
+    QString dur = mPrediction.duration.trimmed();
+    bool    ok  = false;
+    auto    v   = dur.toDouble(&ok);
+    if (ok) {
+        // 取整到分钟，避免出现小数（如 42.3 分钟）。
+        return QString("%1：%2分钟").arg(mPrediction.type, QString::number(qRound(v)));
+    }
+    // 非数字（如 "∞"）时直接显示，不加 "分钟"。
+    return QString("%1：%2").arg(mPrediction.type, dur);
+}
 
 void BatteryInfo::setPrediction(const QString& type, const QString& duration) {
     if (type != mPrediction.type || duration != mPrediction.duration) {

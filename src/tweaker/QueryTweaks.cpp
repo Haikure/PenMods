@@ -50,7 +50,7 @@ void QueryTweaks::setTypeByHand(bool val) {
 
 } // namespace mod
 
-#if PL_BUILD_YDP02X
+// 查词增强：YDP03X 主程序同样导出该符号，故不按平台屏蔽（PenMods3 一样保留）。
 PEN_HOOK(
     uint64,
     _ZN14YResultManager11entryResultERK7QStringS2_S2_N12YEnumWrapper9PageIndexEib,
@@ -69,4 +69,3 @@ PEN_HOOK(
     what.replace(QRegularExpression(QStringLiteral(" {2,}")), QStringLiteral(" "));
     return origin(self, what, a3, a4, a5, a6, a7);
 }
-#endif

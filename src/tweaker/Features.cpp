@@ -12,6 +12,10 @@
 #define FEATURE_DISABLE(fea) (supportFeatures |= 0UL << ((fea) & 0x3F))
 #define FEATURE_HAS(fea)     (((1UL << (fea & 0x3F)) & supportFeatures.to_ulong()) != 0)
 
+// DictPenFeature flag values and the feature-unlock behaviour are YDP02X-specific.
+// On YDP03X the FT::InitFeature / s_supportFeatures symbols exist but the flag
+// layout is unverified, so the patch is left to the stock firmware.
+#if PL_BUILD_YDP02X
 PEN_HOOK(void, _ZN2FT11InitFeatureEv) {
     origin();
 
@@ -28,3 +32,4 @@ PEN_HOOK(void, _ZN2FT11InitFeatureEv) {
     FEATURE_ENABLE(DictPenFeature::LANG_KOR);
     FEATURE_ENABLE(DictPenFeature::KOJN); // enable wordbook filter.
 }
+#endif

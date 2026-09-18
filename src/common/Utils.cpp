@@ -9,6 +9,7 @@
 #include "base/YPointer.h"
 
 #include <QUuid>
+#include <spdlog/spdlog.h>
 
 namespace mod {
 
@@ -52,8 +53,15 @@ std::string readFile(const char* path) {
 }
 
 void showToast(const std::string& content, const QColor& theme) {
+#if PL_BUILD_YDP02X
     PEN_CALL(uint64, "_ZN7YGlobal9showToastERK7QStringRK6QColor", YGlobal*, const QString&, const QColor&)
     (YPointer<YGlobal>::getInstance(), QString::fromStdString(content), theme);
+#else
+    // 三代（YDP03X）toast 由 YBaseSignalAggregate::showToast(QString const&, QColor const&)
+    // 提供（mangled: _ZN21YBaseSignalAggregate9showToastERK7QStringRK6QColor），但其单例的 this
+    // 指针尚未解析，暂以日志代替；QML 层已直接使用 baseSignals.showToast()，C++ 侧 toast 为次要路径。
+    spdlog::info("[showToast] {}", content);
+#endif
 }
 
 bool judgeIsLegalFileName(const QString& filename) {

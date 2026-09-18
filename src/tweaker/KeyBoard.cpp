@@ -53,6 +53,7 @@ void KeyBoard::setAutoSendScanConfig(bool value) {
     }
 }
 
+#if PL_BUILD_YDP02X
 bool KeyBoard::startVoiceInput(QObject* speechManager) {
     auto* startAsrRecord = PEN_SYM("_ZN14YSpeechManager14startAsrRecordEv");
     auto* setAsrResult   = PEN_SYM("_ZN14YSpeechManager12setAsrResultERK7QString");
@@ -74,19 +75,31 @@ bool KeyBoard::stopVoiceInput(QObject* speechManager) {
     reinterpret_cast<void (*)(void*)>(stopAsrRecord)(speechManager);
     return true;
 }
+#else
+// YDP03X: voice input is not wired to the YDP02X speech manager symbols.
+bool KeyBoard::startVoiceInput(QObject*) { return false; }
+bool KeyBoard::stopVoiceInput(QObject*) { return false; }
+#endif
 
 } // namespace mod
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(uint64, _ZN7YGlobal14showSpeechPageEv, uint64 self) {
     if (mod::KeyBoard::getInstance().isStartingVoiceInput()) return 0;
     return origin(self);
 }
+#endif
 
 static bool shouldBlockScan() {
+#if PL_BUILD_YDP02X
     bool inputPageShowing = PEN_CALL(bool, "_ZNK7YGlobal16inputPageShowingEv", void*)(mod::YPointer<YGlobal>::getInstance());
     return inputPageShowing || mod::KeyBoard::getInstance().autoSendScan();
+#else
+    return mod::KeyBoard::getInstance().inputPageShowing();
+#endif
 }
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(bool, _ZN11YSystemBase12onScanFinishERK7QStringi, uint64 self, QString const& content, ScanType scanType) {
     if (shouldBlockScan()) {
         emit mod::KeyBoard::getInstance().scanFinished(content);
@@ -94,7 +107,17 @@ PEN_HOOK(bool, _ZN11YSystemBase12onScanFinishERK7QStringi, uint64 self, QString 
     }
     return origin(self, content, scanType);
 }
+#else
+PEN_HOOK(bool, _ZN11YSystemBase12onScanFinishERK7QStringi, uint64 self, const QString& content, int scanType) {
+    if (shouldBlockScan()) {
+        emit mod::KeyBoard::getInstance().scanFinished(content);
+        return false;
+    }
+    return origin(self, content, scanType);
+}
+#endif
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(uint64, _ZN11YSystemBase8ocrStartEv, uint64 self, uint64 a2, uint64 a3, uint64 a4, uint64 a5) {
     emit mod::Event::getInstance().ocrStarted();
     if (shouldBlockScan()) {
@@ -102,14 +125,33 @@ PEN_HOOK(uint64, _ZN11YSystemBase8ocrStartEv, uint64 self, uint64 a2, uint64 a3,
     }
     return origin(self, a2, a3, a4, a5);
 }
+#else
+PEN_HOOK(uint64, _ZN11YSystemBase8ocrStartEv, uint64 self) {
+    emit mod::Event::getInstance().ocrStarted();
+    if (shouldBlockScan()) {
+        return false;
+    }
+    return origin(self);
+}
+#endif
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(uint64, _ZN11YSystemBase7ocrStopEi, uint64 self, int a2, uint64 a3, uint64 a4, uint64 a5) {
     if (shouldBlockScan()) {
         return false;
     }
     return origin(self, a2, a3, a4, a5);
 }
+#else
+PEN_HOOK(uint64, _ZN11YSystemBase7ocrStopEi, uint64 self, int scanType) {
+    if (shouldBlockScan()) {
+        return false;
+    }
+    return origin(self, scanType);
+}
+#endif
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(
     uint64,
     _ZN11YSystemBase25ocrCompletedResultChangedEv,
@@ -124,3 +166,11 @@ PEN_HOOK(
     }
     return origin(self, a5, a2, a3, a4);
 }
+#else
+PEN_HOOK(uint64, _ZN11YSystemBase25ocrCompletedResultChangedEv, uint64 self) {
+    if (shouldBlockScan()) {
+        return false;
+    }
+    return origin(self);
+}
+#endif

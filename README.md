@@ -20,7 +20,7 @@
 xmake f # 等价于 xmake config ... \
   --qt="/home/example/PenMods/aarch64-linux-qt-5.15.2" \
   --arch=arm64-v8a \
-  --build-platform=YDP02X \
+  --build-platform=YDP03X \
   --target-channel=dev \
   --toolchain=zig \
   -m debug \

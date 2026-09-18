@@ -89,8 +89,10 @@ bool AudioRecorder::start() {
 
     // Init input device — 录音期间阻止音频输出自动关闭
     AudioDaemon::getInstance().acquire(AudioSource::SYSTEM);
+#if PL_BUILD_YDP02X
     PEN_CALL(void*, "_ZN12YSoundCenter9forceStopEv", void*)(YPointer<YSoundCenter>::getInstance());
     exec("amixer cset numid=2 1");
+#endif
     auto info = QAudioDeviceInfo::defaultInputDevice();
     if (!info.isFormatSupported(format)) {
         warn("Default format not supported, trying to use the nearest.");
@@ -211,6 +213,9 @@ bool AudioRecorder::isWorking() { return mInputAudio != nullptr; }
 
 } // namespace mod
 
+#if PL_BUILD_YDP02X
+// YDP02X: the record-path suppression hooks use YDP02X struct offsets and the
+// g_playSeq global; they are not verified on YDP03X, so they are guarded here.
 #if !PL_QEMU
 
 PEN_HOOK(uint32, _ZN12YSoundCenter4playERK7QStringS2_S2_i, void* self, void* a2, void* a3, void* a4, void* a5) {
@@ -271,3 +276,4 @@ PEN_HOOK(uint64, capture_path_onoff, void* a1) {
     }
     return origin(a1);
 }
+#endif

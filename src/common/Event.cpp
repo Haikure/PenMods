@@ -30,6 +30,8 @@ PEN_HOOK(void*, _ZN11YSystemBase17headSetInitStatusEv, void* self) {
     return origin(self);
 }
 
+// YDP02X 通过物理按键码派发 home 键；YDP03X 由 YButtonMonitor::homeKeyPress 回调。
+#if PL_BUILD_YDP02X
 PEN_HOOK(
     uint64,
     _ZN14YButtonMonitor16_do_button_pressE11button_id_tiii,
@@ -50,6 +52,12 @@ PEN_HOOK(
     }
     return origin(self, buttonId, unk_a3, unk_a4, unk_a5);
 }
+#else
+PEN_HOOK(void, _ZN14YButtonMonitor12homeKeyPressEv, void* self) {
+    emit mod::Event::getInstance().homeButtonPressed();
+    origin(self);
+}
+#endif
 
 PEN_HOOK(void*, _ZN7YGlobal23currentPageIndexChangedEv, void* self, void* a2, void* a3, void* a4, void* a5) {
     emit mod::Event ::getInstance().currentPageIndexChanged(

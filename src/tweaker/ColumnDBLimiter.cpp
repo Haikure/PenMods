@@ -59,6 +59,7 @@ PEN_HOOK(uint64, _ZNK10YHistoryDB9loadItemsExi, uint64 self, uint64 a2, uint32 l
     return origin(self, a2, limit);
 }
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(
     uint64,
     _ZNK9YColumnDB10loadMediasERK7QStringiiN12YEnumWrapper14Download_StateEb,
@@ -72,6 +73,22 @@ PEN_HOOK(
     limit = LIMIT;
     return origin(a1, a2, a3, limit, a5, a6);
 }
+#else
+// YDP03X: 枚举从 YEnumWrapper::Download_State 换成 YBaseEnum::DownloadState（参数布局不变）。
+PEN_HOOK(
+    uint64,
+    _ZNK9YColumnDB10loadMediasERK7QStringiiN9YBaseEnum13DownloadStateEb,
+    uint64 a1,
+    uint64 a2,
+    uint32 a3,
+    uint32 limit,
+    uint32 a5,
+    uint32 a6
+) {
+    limit = LIMIT;
+    return origin(a1, a2, a3, limit, a5, a6);
+}
+#endif
 
 PEN_HOOK(uint64, _ZNK10YReadingDB17loadReadingSeriesEiibb, uint64 self, int a2, int limit, bool a4, bool a5) {
     limit = LIMIT;
@@ -104,6 +121,7 @@ PEN_HOOK(uint64, _ZNK11YTextBookDb9loadTasksERK7QStringiib, uint64 self, uint64 
 }
 
 
+#if PL_BUILD_YDP02X
 PEN_HOOK(
     uint64,
     _ZNK11YWordbookDB9loadItemsExN12YEnumWrapper13WordGroupTypeEiNS0_12LanguageTypeENS0_9ItemStateENS0_9SyncStateE,
@@ -118,6 +136,24 @@ PEN_HOOK(
     limit = LIMIT;
     return origin(self, a2, a3, limit, a5, a6, a7);
 }
+#else
+// YDP03X: 在 WordGroupType 之后新增 int page（页码），LIMIT 前移一位，page 不受 LIMIT 限制。
+PEN_HOOK(
+    uint64,
+    _ZNK11YWordbookDB9loadItemsExN12YEnumWrapper13WordGroupTypeEiiNS0_12LanguageTypeENS0_9ItemStateENS0_9SyncStateE,
+    uint64 self,
+    uint64 a2,
+    uint32 a3,
+    uint32 page,
+    uint32 limit,
+    uint32 a6,
+    uint32 a7,
+    uint32 a8
+) {
+    limit = LIMIT;
+    return origin(self, a2, a3, page, limit, a6, a7, a8);
+}
+#endif
 
 // YReadingBookManager::loadMore, ignored.
 // YResultManager::loadMore, ignored

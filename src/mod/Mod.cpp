@@ -131,6 +131,10 @@ void Mod::onUiCompleted() const {
     // YDP022 经典版 16G:   OVERHEAD_D2_SKU_CLA_ADV
     // YDP032 X3S 16G:     OVERHEAD_X3S_SKU_CHN_STD
     // YDP035 HLK STD:     OVERHEAD_D3_SKU_HILINK_STD
+#else
+        // YDP03X firmware reads both via vendor_storage; default to the CHN SKU.
+        {"VENDOR_CUSTOM_ID_0E", "string", "OVERHEAD_D3_SKU_CHN_STD"},
+        {"VENDOR_COMPANY_ID",   "string", "COMPANY_HZ"},
 #endif
     };
 
