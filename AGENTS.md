@@ -40,6 +40,10 @@ PCH: `src/base/Base.h` (STL, Qt, spdlog, Hook.h). All `.cpp` files use it automa
 
 ## Commands That Must Run Outside the Sandbox
 
+> Environment note: this applies to sandboxed agents such as Codex. On an unsandboxed host (the maintainer's
+> `pi` setup) these commands run directly — `xmake f` / `xmake build` with the Zig toolchain and all `adb`
+> commands are verified working with no special handling.
+
 The following commands require local/host execution (or explicit elevated execution outside the agent sandbox):
 
 - All xmake configure and build commands that use the Zig toolchain, including `xmake f ...` and
@@ -56,6 +60,10 @@ Resource generation with `scripts/gen_qt_res.sh` only writes inside the reposito
 For the QML workflow below, run the generation step in the sandbox if desired, then run the xmake and ADB steps
 outside it.
 
+If an xmake build fails with `cannot runv(/tmp/.xmake*/zigcc/c++, ...), No such file or directory`, the cached
+Zig compiler wrapper is stale (its `/tmp` path was cleaned, e.g. after a reboot). Re-run `xmake f ...` to
+regenerate it; do not patch the wrapper by hand.
+
 ## Architecture
 
 ### Entry Point
@@ -70,13 +78,30 @@ outside it.
 - `PEN_HOOK_ADDR(ret_t, name, addr, args_t...)` — hook by raw address
 - `PEN_SYM(sym)` / `PEN_CALL(ret_t, sym, args_t...)` — symbol lookup / call original
 - `src/base/SymDB.cpp` parses `.symtab` via ELFIO at startup; `DobbySymbolResolver` as fallback
+- `binary/YoudaoDictPen` is byte-identical to the device binary (`/oem/YoudaoDictPen/output/YoudaoDictPen`, launched by
+  `/usr/bin/runDictPen`), so `nm -C binary/YoudaoDictPen` reflects exactly the symbols `SymDB` can resolve on-device —
+  including non-dynamic `.symtab` entries such as `_ZNK15YSettingManager15isRightHandModeEv`.
 
 ### Common Services
 
 - `src/common/Event.h` — Qt signal/slot event bus: `beforeUiInitialization`, `uiCompleted`, `homeButtonPressed`, etc.
-- `src/common/Config` — nlohmann_json backed by `/userdata/PenMods/config.json`; macros `WRITE_CFG` / `UPDATE_CFG`
+- `src/mod/Config` — nlohmann_json backed by `/userdata/PenModsconfig.json` (module dir + `config.json`, no slash); macros `WRITE_CFG` / `UPDATE_CFG`. New keys added to defaults are auto-filled on load.
 - `src/common/Utils.h` — `exec()` (shell), `H()` (DJB2 hash for string dispatch), `showToast()`, `fuzzyLrcMatch()`
 - `src/common/service/Singleton.h` — CRTP base template for all major classes
+- `src/media/MediaSession` — `mediaSession` context property; a plugin that plays its own audio claims it to
+  drive the quick settings panel, otherwise the panel reads the host `mediaPlayerManager`. See `### Plugin System`.
+
+### Host Objects Used from PenMods QML
+
+| QML name | Host class | Notes |
+|---|---|---|
+| `settingManager` | `YSettingManager` | `isRightHandMode`, `lcdBrightness`, `updateVolumeAndLcd()`, … |
+| `mediaPlayerManager` | `YMediaPlayerManager` | Host music player: `title`, `playState`, `progress`, `currentPos`, `duration`, `hasLrc`, `onClickedPlay/Pause/Prev/Next()` |
+| `YEnum` | host enums | `PLAYING`, `STOPPED`, `PM_AudioPlayer`, `Screen.Width/Height`, … |
+
+Left/right hand mode is a 180° rotation applied to the main window in QML (`settingManager.isRightHandMode ? 0 : 180`);
+the host's `YSettingManager::rotate(int)` is an empty stub, so nothing else in the system learns about it. The value is
+persisted as `righthandmode` in `/userdata/DictPenData/NeteaseYoudao/YoudaoDictPen.conf`.
 
 ### Module Organization
 
@@ -90,6 +115,7 @@ outside it.
 | `src/helper/` | AntiEmbs, NetworkSettings, DeveloperSettings, ServiceManager |
 | `src/system/` | BatteryInfo, InputDaemon, ScreenManager, AudioDaemon |
 | `src/plugin/` | PluginManager, PluginSDK.h (public C ABI), QmlPluginWrapper |
+| `src/media/` | MediaSession: plugin media interface for the quick settings panel |
 | `src/locker/` | Password-protected page feature |
 | `src/recorder/` | Audio recorder |
 | `src/rime/` | librime input method |
@@ -103,11 +129,13 @@ outside it.
 
 ### QML Integration
 
-Package `com.github.penuniverse` (1.0). Context properties registered in Engine.cpp or constructors: `mod`, `musicPlayer`, `videoPlayer`, `textReader`, `fileManager`, `imageViewer`, `workBookTweaks`, `queryTweaks`, `columnDb`, `batteryInfo`, `locker`, `wallpaperManager`. `PageIndex` is an uncreatable enum type. **All QML must fit 320×170 touchscreen** — prefer Youdao custom components over stock QML.
+Package `com.github.penuniverse` (1.0). Context properties registered in Engine.cpp or constructors: `mod`, `musicPlayer`, `videoPlayer`, `textReader`, `fileManager`, `imageViewer`, `workBookTweaks`, `queryTweaks`, `columnDb`, `batteryInfo`, `locker`, `wallpaperManager`, `mediaSession`. `PageIndex` and `MediaSession` are uncreatable enum types. **All QML must fit 320×170 touchscreen** — prefer Youdao custom components over stock QML.
 
 ### QML Resource Workflow
 
-- Edit the source QML files under `resource/models/YDP02X/`.
+- Edit the source QML files under `resource/models/YDP02X/`. The whole `qml/` tree is listed in
+  `.git/info/exclude`, so it is untracked/ignored by git — only the regenerated `qrc_qml.h` is committed. Stage
+  that generated header together with the C++ changes.
 - `resource/models/YDP02X/qrc_qml.h` is generated output. Never edit or format it manually, including whitespace-only fixes; any manual change will be overwritten by the next resource generation.
 - After any QML or bundled resource change, regenerate, build, and deploy with:
   ```sh
@@ -131,7 +159,41 @@ Package `com.github.penuniverse` (1.0). Context properties registered in Engine.
 
 ### Plugin System
 
-Plugins live in `/userdisk/PenMods/plugins/<id>/` with `metadata.json` and optional `.so`. The `.so` must export `init_plugin()` and optionally `init_plugin_with_hook_api(PluginHookAPI*)`. `PluginSDK.h` defines the public C ABI. Disabled via `.disabled` marker file.
+Plugins live in `/userdisk/PenMods/plugins/<id>/` with `metadata.json` and optional `.so`. The `.so` must export `init_plugin()` and optionally `init_plugin_with_hook_api(PluginHookAPI*)` or `init_plugin_with_media_api(PluginMediaAPI*)`. `PluginSDK.h` defines the public C ABI. Disabled via `.disabled` marker file.
+
+- `.so` files are loaded eagerly at startup (`PluginManager` constructor) and the `init_plugin*` entry points run inside
+  `BeforeMain`, i.e. before any `QCoreApplication`/UI exists; a plugin's `attach_engine` runs later at
+  `beforeUiInitialization`. Plugin QML (`main_qml`) is only loaded on demand by the plugin manager page.
+- Plugin QML shares the app's root context, so all context properties (`mediaSession`, `shell`, `mod`, registrations its
+  own `attach_engine` made, …) are visible. Importing `com.github.penuniverse` gives access to PenMods enums such as
+  `MediaSession.Playing`.
+- The `mediaSession` context property (`src/media/MediaSession`) lets a plugin that plays its own audio claim the
+  quick-settings music controls: it reports title/lyrics/state/progress and receives play/pause/next/prev/stop. Only one
+  session exists at a time; without one the panel reads the host `mediaPlayerManager`, so the host path is unaffected.
+  `YQuickMusicPlayer.qml` / `YQuickSettingLayer.qml` implement that fallback, and `PluginManager::unloadSo()` releases a
+  plugin's session (and clears its C ABI callbacks) when it is disabled. See `doc/PLUGIN_DEV_GUIDE.md`.
+
+### Keyboard & Rime
+
+- `mod::KeyBoard` is the `keyBoard` context property and owns `keyboardLayout` (`"native"` / `"compact"`), persisted
+  under the `keyboard` section of the config. The QML character keyboards render from row models:
+  `YInputTextCharsModelBase` is a `Column` of `Row`s, and the `YInputText{Lower,Upper,Number,Symbol}Chars` pages
+  provide the `rows`. Compact mode uses QWERTY (10/9/7) for letters and 7 columns for digits/symbols; native mode
+  reproduces the original 5-per-row `Flow` left-aligned layout.
+- `rime::Backend` is the `rime` context property and wraps librime maintenance/schema APIs: `schemaListJson()`,
+  `selectSchema()`, `redeploy()`, `syncUserData()`. `select_schema` persists the choice to `user.yaml`. Long-running
+  maintenance/sync runs on a `QThreadPool` worker and reports back through queued signals — never block the UI
+  thread. Each `YInputPage` creates its own `RimeWrapper` session, so a changed layout or schema takes effect on the
+  next input-page open.
+- Rime data dir is `/userdisk/Music/Rime` (schema + user data + build staging).
+
+### External Video Player (mpv)
+
+`externalPlayer.open()` (`src/filemanager/player/ExternalPlayer.cpp`) starts `/userdisk/VideoPlayer`, a shell wrapper
+around `/userdisk/mpv/bin/mpv` (0.36.0, `vo=wlshm`, config in `/userdisk/mpv/config`). It is a separate Wayland client,
+so it never learns about left/right hand mode; the mod passes `--video-rotate=180` in left-hand mode. `--video-rotate`
+rotates the video frame only — subtitles/OSD are composited by the VO afterwards and stay unrotated (add `--vf=sub` to
+render them into the frame before the autorotate post-filter if that ever needs to change).
 
 ## Deployment Paths (on-device)
 
@@ -140,7 +202,97 @@ Plugins live in `/userdisk/PenMods/plugins/<id>/` with `metadata.json` and optio
 | `/userdata/PenMods/libPenMods.so` | Main mod library |
 | `/userdata/PenMods/libPenModsResources.so` | Optional Qt resource overrides |
 | `/userdisk/PenMods/plugins/<id>/` | Plugin directory |
-| `/userdisk/PenMods/config.json` | User config |
+| `/userdata/PenModsconfig.json` | User config (note: no slash before `config.json`) |
+| `/userdata/applog/DictPen_<timestamp>.log` | `YoudaoDictPen` stdout: spdlog + QML `console.log` |
+| `/tmp/rime/` | librime logs |
+| `/userdisk/Music/Rime/` | Rime user/shared data dir |
+
+## On-Device UI Verification
+
+The device has no Android `logcat`; `YoudaoDictPen` writes stdout to `/userdata/applog/DictPen_<YYYYMMDD_HHMMSS>.log`.
+QML `console.log(...)` lines appear there prefixed with `[qml]`. After restarting the app, grep that file for
+`ReferenceError|TypeError|Unable to assign|Cannot read|is not a function` to catch broken QML bindings.
+
+### Screen orientation
+
+- The physical panel is 170×320 (portrait) and Weston runs with `transform=270` (`/etc/xdg/weston/weston.ini`), so
+  the logical Qt UI is 320×170 landscape. `weston-screenshooter`, `evtest`, `/dev/uinput`, and `/dev/fb0` exist on
+  the device; `/dev/fb0` is blank, and the screenshooter results are the raw portrait framebuffer (see below).
+
+### Screenshots
+
+The tested YDP02X unit already runs Weston with `--debug` (`cat /proc/$(pidof weston)/cmdline`), so the debug protocol
+is available and no launcher edit is needed:
+
+```sh
+adb shell 'cd /tmp && rm -f wayland-screenshot-*.png && \
+  XDG_RUNTIME_DIR=/var/run WAYLAND_DISPLAY=wayland-0 weston-screenshooter'
+adb pull /tmp/wayland-screenshot-*.png
+```
+
+The PNG is the raw panel framebuffer (portrait 170×320); rotate it 270° (`PIL: img.rotate(270, expand=True)`) to get
+the 320×170 UI. If `weston-screenshooter` reports a protocol error, the unit was started without `--debug`: back up
+`/etc/init.d/S50launcher`, add `--debug` to the `weston ...` command (~line 96), reboot (or restart Weston), and
+restore the file when done.
+
+### Touch injection (for UI navigation)
+
+Driving the UI over ADB needs a `/dev/uinput` device. Two findings on the tested unit:
+
+- Emitting MT-B touch events (`ABS_MT_SLOT` / `ABS_MT_TRACKING_ID` / `ABS_MT_POSITION_X` / `ABS_MT_POSITION_Y` +
+  `BTN_TOUCH`, `INPUT_PROP_DIRECT`) makes Weston open the device, but the resulting `wl_touch` events never reach the
+  Qt client — the UI does not react.
+- An **absolute pointer** device works: `EV_ABS` `ABS_X` (0..170) / `ABS_Y` (0..320) plus `BTN_LEFT`, without
+  `INPUT_PROP_DIRECT`. Weston sends pointer motion/button events, which the QML `MouseArea`s handle.
+
+The kernel is 4.4, so `UI_DEV_SETUP` / `UI_ABS_SETUP` do not exist. Use the legacy path: enable the event bits with
+`UI_SET_EVBIT` / `UI_SET_KEYBIT` / `UI_SET_ABSBIT`, then `write()` a filled `struct uinput_user_dev` (name,
+`id.bustype`, `absmin[]` / `absmax[]`) before `UI_DEV_CREATE`.
+
+Coordinate mapping (same for both device types): compositor UI point `(ux, uy)` → raw device coordinates
+`raw_x = uy`, `raw_y = 319 - ux`. A click is one motion report (`ABS_X` / `ABS_Y` + `SYN_REPORT`), then `BTN_LEFT`
+1/0; a drag is press, a series of motion reports, release — this scrolls QML `Flickable` / `ListView`s. In left-hand
+mode the app rotates its own content 180°, so tap `(319 - ux, 169 - uy)` instead (the compositor transform itself
+never changes).
+
+```sh
+zig cc -target aarch64-linux-gnu.2.27 -O2 -o injector injector.c   # glibc target cannot be -static
+adb push injector /tmp/ && adb shell 'chmod +x /tmp/injector'
+adb shell '/tmp/injector tap ui 160 107'              # click a UI point
+adb shell '/tmp/injector swipe ui 290 107 20 107'     # drag / scroll
+```
+
+Confirm every step with a screenshot. `evtest /dev/input/eventN` prints a device's capabilities and events, which
+isolates “device created but the app ignores it” from “wrong coordinates”. Remove `/tmp/injector` when done.
+
+Navigation facts: the home page (`YIndexPage`) is a horizontal scroll list (items 112×102, left margin 10, spacing 8,
+`y` 56..158) whose entries are 查词翻译 / AI 助手 / 录音机 / 单词本 / 听力练习 / 历史 / 插件管理 / 更多设置
+→ `YSettingPage`; scroll it with a horizontal drag. `听力练习` → `YAudioPage`, whose `文件管理` tile opens the file
+browser (`录音文件` and `MUSIC` hold audio, `.mp4` files start mpv through `externalPlayer`). The plugin manager lists
+one card per plugin — toggle on the right, `打开` / `卸载` at the bottom of the card — and re-scans when the page
+opens. The settings grid is a single vertical column of 58px cells. The quick settings panel opens by dragging down
+from the top edge and closes by dragging back up.
+
+### Restart hygiene
+
+Restart the app with `adb shell 'sync; killall YoudaoDictPen'`; a guardian relaunches it within a few seconds. Wait
+for `pidof YoudaoDictPen` to be stable (~10 s) before killing it again: `PluginManager` writes a `.loading` marker
+before loading each plugin `.so`, so killing the process mid-load leaves the marker behind and the next start treats
+that plugin as crashed, auto-disabling it. After a burst of restarts, check and clean up:
+
+```sh
+adb shell 'for d in /userdisk/PenMods/plugins/*/; do [ -f "$d/.loading" ] && echo "loading: $d"; done'
+adb shell 'rm -f /userdisk/PenMods/plugins/*/.loading /userdisk/PenMods/plugins/<id>/.disabled'
+```
+
+Only the newest `/userdata/applog/DictPen_*.log` is kept (older files are removed at startup), the device clock runs
+in UTC while the host is UTC+8, and `pidof YoudaoDictPen` normally reports two PIDs.
+
+### Quick layout checks without touch
+
+`keyBoard.keyboardLayout` is persisted in `/userdata/PenModsconfig.json`. For a no-touch check, edit that JSON
+(`"layout": "compact"` / `"native"`) and restart the app; the preloaded `YInputPage` (`main.qml`
+`preloadMainKeyboard`) instantiates all four character pages at startup, so the layout is exercised immediately.
 
 ## Code Style
 

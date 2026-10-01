@@ -126,7 +126,8 @@ Config::Config() : Logger("Config") {
             {"hide_paired_lyrics", false},
             {"show_hidden_files", false},
             {"pause_on_scan", false},
-            {"hide_floating_window", false}
+            {"hide_floating_window", false},
+            {"quick_panel_music_view", false}
         }},
         {"wallpaper", {
             {"mode", 0},
@@ -137,6 +138,9 @@ Config::Config() : Logger("Config") {
         }},
         {"capture", {
             {"enabled", false}
+        }},
+        {"keyboard", {
+            {"layout", "native"}
         }},
         {"ai", {
             {"auto_send_scan", true},
