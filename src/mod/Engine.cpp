@@ -12,6 +12,7 @@
 #endif
 
 #include <QQmlContext>
+#include <QQmlEngine>
 #include <QQuickView>
 
 #include <QFile>
@@ -214,6 +215,7 @@ PEN_HOOK(void, _ZN22YGuiApplicationPrivate6initUiEv,
     auto* context = view ? view->rootContext() : nullptr;
     if (view) {
         mod::YPointer<QQuickView>::setInstance(view);
+        view->engine()->addImportPath(QStringLiteral("/userdisk/PenMods/qml"));
     }
     if (context) {
         emit mod::Event::getInstance().beforeUiInitialization(*view, context);

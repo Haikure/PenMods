@@ -47,10 +47,9 @@ void VideoPlayer::onStatusChanged(const QString& status) {
 
 #else
 
-// YDP03X: video playback is routed to the external player /userdisk/VideoPlayer
-// (mirroring PenMods3). No ydubus_sender_send_event dependency.
+// YDP03X: legacy callers share the embedded player and MPV fallback route.
 
-#include <QProcess>
+#include "filemanager/player/ExternalPlayer.h"
 
 #include <spdlog/spdlog.h>
 
@@ -64,17 +63,13 @@ VideoPlayer::VideoPlayer() {
 
 void VideoPlayer::open(QString dir) {
     mOpeningFileName = std::move(dir);
-    const QString path = FileManager::getInstance().getCurrentPath().absoluteFilePath(mOpeningFileName);
-    spdlog::info("external player open video: {}", path.toStdString());
-    QProcess::startDetached(QStringLiteral("/userdisk/VideoPlayer"), {path});
+    ExternalPlayer::getInstance().open(mOpeningFileName);
 }
 
-QString VideoPlayer::getOpeningPath() {
-    return "file://" + FileManager::getInstance().getCurrentPath().absoluteFilePath(mOpeningFileName);
-}
+QString VideoPlayer::getOpeningPath() { return ExternalPlayer::getInstance().getOpeningPath(); }
 
 void VideoPlayer::onStatusChanged(const QString& status) {
-    // 外部播放器为独立进程，无原生播放器状态事件；保留接口兼容。
+    // 内嵌播放器由自己的 QML 页面管理状态；保留旧接口兼容。
     spdlog::info("video status: {}", status.toStdString());
 }
 

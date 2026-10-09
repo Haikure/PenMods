@@ -136,3 +136,7 @@ target('QrcExporter')
     add_packages(
         'spdlog',
         'dobby')
+
+-- Optional standalone QML plugin, deployed to /userdisk/PenMods/qml/FFmpegPlayer.
+-- Enable its dependency graph with PENMODS_WITH_PLAYER=1 when building it.
+includes('external/ffmpeg-player')
