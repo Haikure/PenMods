@@ -40,6 +40,10 @@ NetworkSettings::NetworkSettings() {
 
 bool NetworkSettings::getProxyEnabled() const { return mProxyEnabled; }
 void NetworkSettings::setProxyEnabled(bool enabled) {
+    if (enabled && (mProxyHostName.trimmed().isEmpty() || mProxyPort < 1 || mProxyPort > 65535)) {
+        showToast("请先填写代理地址和有效端口", "#E9900C");
+        return;
+    }
     if (mProxyEnabled != enabled) {
         mProxyEnabled         = enabled;
         mCfg["proxy_enabled"] = enabled;
@@ -50,6 +54,7 @@ void NetworkSettings::setProxyEnabled(bool enabled) {
 
 NetworkSettings::Type NetworkSettings::getProxyType() const { return mProxyType; }
 void                  NetworkSettings::setProxyType(Type type) {
+    if (type != Socks5 && type != HTTP) return;
     if (mProxyType != type) {
         mProxyType         = type;
         mCfg["proxy_type"] = type;
@@ -60,9 +65,14 @@ void                  NetworkSettings::setProxyType(Type type) {
 
 QString NetworkSettings::getProxyHostName() const { return mProxyHostName; }
 void    NetworkSettings::setProxyHostName(const QString& hostName) {
-    if (mProxyHostName != hostName) {
-        mProxyHostName         = hostName;
-        mCfg["proxy_hostname"] = hostName.toStdString();
+    const QString host = hostName.trimmed();
+    if ((mProxyEnabled && host.isEmpty()) || host.contains('\n') || host.contains('\r')) {
+        showToast("代理地址无效", "#E9900C");
+        return;
+    }
+    if (mProxyHostName != host) {
+        mProxyHostName         = host;
+        mCfg["proxy_hostname"] = host.toStdString();
         WRITE_CFG;
         emit proxyHostNameChanged();
     }
@@ -70,6 +80,10 @@ void    NetworkSettings::setProxyHostName(const QString& hostName) {
 
 int  NetworkSettings::getProxyPort() const { return mProxyPort; }
 void NetworkSettings::setProxyPort(int port) {
+    if (port < 1 || port > 65535) {
+        showToast("代理端口必须为 1–65535", "#E9900C");
+        return;
+    }
     if (mProxyPort != port) {
         mProxyPort         = port;
         mCfg["proxy_port"] = port;
@@ -115,7 +129,7 @@ void NetworkSettings::_refreshApplicationProxy() {
     }());
     proxy.setHostName(mProxyHostName);
     proxy.setPort(mProxyPort);
-    if (mProxyUserName.isEmpty()) {
+    if (!mProxyUserName.isEmpty()) {
         proxy.setUser(mProxyUserName);
         proxy.setPassword(mProxyPassword);
     }

@@ -143,9 +143,12 @@ void BatteryInfo::setAutoSuspendDurationStr(const QString& str) {
         val = strtol(str.mid(0, str.indexOf("分")).toStdString().c_str(), nullptr, 10) * 60;
     }
     if (mAutoSuspendDuration != val) {
+        if (!InputDaemon::getInstance().setSystemSuspend(val)) {
+            showToast("无法保存休眠设置，请检查休眠时长是否晚于息屏时长", "#E9900C");
+            return;
+        }
         mCfg["suspend_duration"] = val;
         mAutoSuspendDuration     = val;
-        InputDaemon::getInstance().setSystemSuspend(val);
         WRITE_CFG;
         emit autoSuspendDurationChanged();
     }

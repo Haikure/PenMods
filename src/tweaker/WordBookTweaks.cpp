@@ -14,8 +14,11 @@
 
 #include "filemanager/FileManager.h"
 
+#include <QDir>
 #include <QFile>
 #include <QQmlContext>
+#include <QSaveFile>
+#include <QTimer>
 #include <QVariant>
 
 
@@ -41,7 +44,6 @@ WordBookTweaks::WordBookTweaks() {
 
         // for tab-type phrase, fix wordCount;
         if (query.startsWith("SELECT count(*) FROM table_wordbook") && getPhraseTab()) {
-#if PL_BUILD_YDP02X
             auto tabType =
                 PEN_CALL(uint32, "_ZNK16YWordBookManager7tabTypeEv", void*)(YPointer<YWordBookManager>::getInstance());
             if (tabType == 2) {
@@ -49,7 +51,6 @@ WordBookTweaks::WordBookTweaks() {
             } else if (tabType == 3) {
                 query += " AND word LIKE '% %'";
             }
-#endif
         }
     });
 
@@ -72,14 +73,111 @@ void WordBookTweaks::doExport() {
         );
     pickUpQuery = true;
 #else
-    // TODO(YDP03X): wordbook export reads YDP02X offsets and DictPenFeature flags;
-    // not ported to YDP03X.
-    showToast("导出功能暂未适配当前设备", "#E9900C");
+    if (mExporting) return;
+    auto  load     = PEN_CALL(uint64, "_ZNK11YWordbookDB12loadAllWordsEN12YEnumWrapper9ItemStateE", void*, uint32);
+    auto* database = YPointer<YWordbookDB>::getInstance();
+    if (!load || !database) {
+        showToast("单词本尚未就绪", "#E9900C");
+        return;
+    }
+    setExporting(true);
+    mExportProgress = 0;
+    emit exportProgressChanged();
+    mPendingExportId     = load(database, 1);
+    const auto requestId = mPendingExportId;
+    QTimer::singleShot(30000, this, [this, requestId] {
+        if (mPendingExportId == requestId && mExporting) {
+            mPendingExportId = 0;
+            setExporting(false);
+            showToast("读取单词本超时", "#E9900C");
+        }
+    });
 #endif
 }
 
-bool WordBookTweaks::exportFromQueryResult(uint64 queryResult) {
+bool WordBookTweaks::consumeExportResult(void* result) {
+#if PL_BUILD_YDP03X
+    // onExecFinished at 0x58f198 reads AsyncQueryResult::id at +0x50.
+    // Own the request ID instead of writing the host manager's private flags.
+    if (!mExporting || !mPendingExportId || !result) return false;
+    const auto id = *reinterpret_cast<const uint64*>(static_cast<const char*>(result) + 0x50);
+    if (id != mPendingExportId) return false;
+    mPendingExportId = 0;
+    if (!PEN_CALL(bool, "_ZNK8Database16AsyncQueryResult7isValidEv", void*)(result)) {
+        setExporting(false);
+        showToast("读取单词本失败", "#E9900C");
+        return true;
+    }
+    const int count = PEN_CALL(int, "_ZNK8Database16AsyncQueryResult5countEv", void*)(result);
+    mExportWords.clear();
+    for (int i = 0; i < count; ++i) {
+        const auto value =
+            PEN_CALL(QVariant, "_ZNK8Database16AsyncQueryResult5valueEiRK7QString", void*, int, const QString&)(
+                result,
+                i,
+                QStringLiteral("word")
+            );
+        if (!value.toString().isEmpty()) mExportWords.append(value.toString());
+    }
+    mExportWords.removeDuplicates();
+    mExportData = {
+        {"version", 100           },
+        {"words",   json::array() },
+        {"data",    json::object()}
+    };
+    mExportIndex = 0;
+    QTimer::singleShot(0, this, &WordBookTweaks::exportNextWord);
+    return true;
+#else
+    Q_UNUSED(result);
+    return false;
+#endif
+}
+
+void WordBookTweaks::exportNextWord() {
+#if PL_BUILD_YDP03X
+    if (!mExporting) return;
+    if (mExportIndex < mExportWords.size()) {
+        const QString word = mExportWords.at(mExportIndex++);
+        mExportData["words"].push_back(word.toStdString());
+        const bool option                                        = false;
+        using Lookup                                             = QString (*)(void*, const QString&, const bool&);
+        const std::pair<const char*, const char*> dictionaries[] = {
+            {"Senior",                "_ZN16YDictQueryEngine11querySeniorERK7QStringRKb"               },
+            {"PureEnglishAndExample", "_ZN16YDictQueryEngine26queryPureEnglishAndExampleERK7QStringRKb"}
+        };
+        auto* engine = YPointer<YDictQueryEngine>::getInstance();
+        for (const auto& [name, symbol] : dictionaries) {
+            auto lookup = reinterpret_cast<Lookup>(PEN_SYM(symbol));
+            if (!engine || !lookup) continue;
+            const QString raw    = lookup(engine, word, option);
+            auto          parsed = json::parse(raw.toStdString(), nullptr, false);
+            if (!parsed.is_discarded()) mExportData["data"][name][word.toStdString()] = std::move(parsed);
+        }
+        mExportProgress = mExportIndex * 100 / mExportWords.size();
+        emit exportProgressChanged();
+        // Yield between words; native dictionary readers stay on the UI thread.
+        QTimer::singleShot(0, this, &WordBookTweaks::exportNextWord);
+        return;
+    }
+    QDir().mkpath(QStringLiteral("/userdisk/Favorite"));
+    QSaveFile  file(QStringLiteral(WB_EXPORT_FILE));
+    const auto payload = mExportData.dump();
+    const bool saved =
+        file.open(QIODevice::WriteOnly)
+        && file.write(payload.data(), static_cast<qint64>(payload.size())) == static_cast<qint64>(payload.size())
+        && file.commit();
+    mExportWords.clear();
+    mExportData     = json();
+    mExportProgress = saved ? 100 : 0;
+    emit exportProgressChanged();
+    setExporting(false);
+    showToast(saved ? "单词本已导出到 Favorite/WordBook.json" : "保存单词本失败", saved ? "#64D99A" : "#E9900C");
+#endif
+}
+
 #if PL_BUILD_YDP02X
+bool WordBookTweaks::exportFromQueryResult(uint64 queryResult) {
     QFile file(WB_EXPORT_FILE);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         showToast("单词本导出失败，文件打开失败", "#E9900C");
@@ -146,12 +244,33 @@ bool WordBookTweaks::exportFromQueryResult(uint64 queryResult) {
     showToast("单词本导出成功");
     filemanager::FileManager::getInstance().setMtpOnoff(true);
     return true;
-#else
-    // TODO(YDP03X): the querySenior/queryOxford/queryPureEnglishAndExample signatures
-    // gained a trailing bool on YDP03X and DictPenFeature is YDP02X-only; not ported.
-    return false;
-#endif
 }
+#endif
+
+#if PL_BUILD_YDP03X
+PEN_HOOK(void, _ZN16YWordBookManager14onExecFinishedERKN8Database16AsyncQueryResultE, void* self, void* result) {
+    if (!mod::WordBookTweaks::getInstance().consumeExportResult(result)) origin(self, result);
+}
+
+PEN_HOOK(
+    QString,
+    _ZNK18YWordbookDBPrivate15getLoadItemsCmdExN12YEnumWrapper13WordGroupTypeEiiNS0_12LanguageTypeENS0_9ItemStateENS0_9SyncStateE,
+    void*   self,
+    int64_t lastId,
+    int     group,
+    int     page,
+    int     limit,
+    int     language,
+    int     itemState,
+    int     syncState
+) {
+    const bool split = mod::WordBookTweaks::getInstance().getPhraseTab() && (group == 2 || group == 3);
+    auto       query = origin(self, lastId, split ? 1 : group, page, limit, language, itemState, syncState);
+    if (split)
+        query.replace("ORDER BY", group == 2 ? "AND word NOT LIKE '% %' ORDER BY" : "AND word LIKE '% %' ORDER BY");
+    return query;
+}
+#endif
 
 bool WordBookTweaks::getExporting() const { return mExporting; }
 

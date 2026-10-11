@@ -31,6 +31,8 @@ private:
     Q_PROPERTY(QString dns READ getDNS NOTIFY networkChanged);
 
 public:
+    Q_INVOKABLE void refresh() { emit networkChanged(); }
+
     [[nodiscard]] bool getProxyEnabled() const;
     void               setProxyEnabled(bool enabled);
 

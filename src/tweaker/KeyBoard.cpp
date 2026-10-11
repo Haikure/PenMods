@@ -16,18 +16,30 @@
 namespace mod {
 
 KeyBoard::KeyBoard() {
-    auto& config  = mod::Config::getInstance();
-    json  aiCfg   = config.read("ai");
+    auto& config         = mod::Config::getInstance();
+    json  aiCfg          = config.read("ai");
     m_autoSendScanConfig = aiCfg.contains("auto_send_scan") ? aiCfg["auto_send_scan"].get<bool>() : true;
+
+    mCfg             = config.read(mClassName);
+    m_keyboardLayout = QString::fromStdString(mCfg.value("layout", std::string("native")));
+    if (m_keyboardLayout != "compact") m_keyboardLayout = "native";
 
     connect(&Event::getInstance(), &Event::beforeUiInitialization, [this](QQuickView& view, QQmlContext* context) {
         context->setContextProperty("keyBoard", this);
     });
 }
 
+void KeyBoard::setKeyboardLayout(const QString& value) {
+    const QString layout = value == "compact" ? "compact" : "native";
+    if (m_keyboardLayout == layout) return;
+    m_keyboardLayout = layout;
+    mCfg["layout"]   = layout.toStdString();
+    WRITE_CFG;
+    emit keyboardLayoutChanged();
+}
+
 void KeyBoard::setAutoSendScan(bool value) {
-    if (value && m_inputPageShowing)
-        return;
+    if (value && m_inputPageShowing) return;
     if (m_autoSendScan != value) {
         m_autoSendScan = value;
         emit autoSendScanChanged();
@@ -44,8 +56,8 @@ void KeyBoard::setInputPageShowing(bool value) {
 void KeyBoard::setAutoSendScanConfig(bool value) {
     if (m_autoSendScanConfig != value) {
         m_autoSendScanConfig = value;
-        auto& config = mod::Config::getInstance();
-        json aiCfg   = config.read("ai");
+        auto& config         = mod::Config::getInstance();
+        json  aiCfg          = config.read("ai");
         if (aiCfg.is_null()) aiCfg = json::object();
         aiCfg["auto_send_scan"] = value;
         config.write("ai", aiCfg, true);
@@ -92,10 +104,10 @@ PEN_HOOK(uint64, _ZN7YGlobal14showSpeechPageEv, uint64 self) {
 
 static bool shouldBlockScan() {
 #if PL_BUILD_YDP02X
-    auto* global = mod::YPointer<YGlobal>::getInstance();
-    auto* isInputPageShowing = PEN_SYM("_ZNK7YGlobal16inputPageShowingEv");
-    const bool inputPageShowing = global && isInputPageShowing
-        && reinterpret_cast<bool (*)(void*)>(isInputPageShowing)(global);
+    auto*      global             = mod::YPointer<YGlobal>::getInstance();
+    auto*      isInputPageShowing = PEN_SYM("_ZNK7YGlobal16inputPageShowingEv");
+    const bool inputPageShowing =
+        global && isInputPageShowing && reinterpret_cast<bool (*)(void*)>(isInputPageShowing)(global);
     return inputPageShowing || mod::KeyBoard::getInstance().autoSendScan();
 #elif PL_BUILD_YDP03X
     // Only custom PenMods input pages should consume scan events. The QWE widget state

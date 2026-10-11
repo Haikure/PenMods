@@ -32,9 +32,30 @@ struct Version {
 class Updater : public QObject, public Singleton<Updater>, private Logger {
     Q_OBJECT
 
+    Q_PROPERTY(QString source READ source WRITE setSource NOTIFY stateChanged)
+    Q_PROPERTY(QString currentVersion READ currentVersion NOTIFY stateChanged)
+    Q_PROPERTY(QString targetVersion READ targetVersion NOTIFY stateChanged)
+    Q_PROPERTY(QString note READ note NOTIFY stateChanged)
+    Q_PROPERTY(QString statusText READ statusText NOTIFY stateChanged)
+    Q_PROPERTY(int progress READ progress NOTIFY stateChanged)
+    Q_PROPERTY(bool busy READ busy NOTIFY stateChanged)
+    Q_PROPERTY(bool canDownload READ canDownload NOTIFY stateChanged)
+    Q_PROPERTY(bool canInstall READ canInstall NOTIFY stateChanged)
+
     struct UpdateInfo;
 
 public:
+    QString source() const;
+    void    setSource(const QString& value);
+    QString currentVersion() const { return mInfo.mCurrentStr; }
+    QString targetVersion() const { return mInfo.mLatestStr; }
+    QString note() const { return mInfo.mUpdateNote; }
+    QString statusText() const;
+    int     progress() const { return mInfo.mDownloadProgress; }
+    bool    busy() const;
+    bool    canDownload() const { return mInfo.mOtaStatus == HAS_NEW_VERSION; }
+    bool    canInstall() const { return mInfo.mOtaStatus == DOWNLOAD_FINISHED; }
+
     Q_INVOKABLE void check();
 
     Q_INVOKABLE void download();
@@ -45,6 +66,9 @@ public:
 
     UpdateInfo& getInfo();
 
+signals:
+    void stateChanged();
+
 private:
     friend Singleton<Updater>;
     explicit Updater();
@@ -52,7 +76,8 @@ private:
     std::string mClassName = "updater";
 
     // latest.
-    json mLatestObject;
+    json    mLatestObject;
+    QString mSource;
 
     const Version mSelfVersion = {VERSION_MAJOR, VERSION_MINOR, VERSION_ALTER};
 
@@ -68,7 +93,7 @@ private:
 
     std::string _calcFileMd5(const QString&);
 
-    void _unzip(QString, QString);
+    bool _unzip(QString, QString);
 
     void _cleanupTemp();
 

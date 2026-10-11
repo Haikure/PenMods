@@ -610,8 +610,9 @@ void FileManager::setShowHiddenFiles(bool val) {
     }
 }
 
-void FileManager::playFromView(const QString& fileName) {
-    if (mCurrentPlayingPath != mCurrentPath) {
+bool FileManager::playFromView(const QString& fileName) {
+    auto& player = MusicPlayer::getInstance();
+    if (mCurrentPlayingPath != mCurrentPath || player.getPlayListRef().empty()) {
         refreshPlayList();
         mCurrentPlayingPath = mCurrentPath;
 
@@ -619,16 +620,16 @@ void FileManager::playFromView(const QString& fileName) {
         QMutexLocker locker(&mInotifyMutex);
         addInotifyWatch(mCurrentPlayingPath.path());
     }
-    size_t idx   = 0;
-    bool   valid = false;
-    for (auto& file : MusicPlayer::getInstance().getPlayListRef()) {
-        if (file->fileName() == fileName) {
-            valid = true;
-            break;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto& list = player.getPlayListRef();
+        for (size_t idx = 0; idx < list.size(); ++idx) {
+            if (list[idx]->fileName() == fileName) return player.play(idx);
         }
-        idx++;
+        // A directory update may have invalidated the cached playlist.
+        if (attempt == 0) refreshPlayList();
     }
-    if (valid) MusicPlayer::getInstance().play(idx);
+    showToast("未找到可播放的音频文件", "#E9900C");
+    return false;
 }
 
 void FileManager::refreshPlayList() {

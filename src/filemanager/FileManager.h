@@ -98,7 +98,7 @@ public:
 
     void setShowHiddenFiles(bool);
 
-    Q_INVOKABLE void playFromView(const QString& fileName);
+    Q_INVOKABLE bool playFromView(const QString& fileName);
 
     Q_INVOKABLE void executeFile(const QString& fileName);
 

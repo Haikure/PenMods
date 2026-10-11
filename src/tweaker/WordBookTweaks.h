@@ -35,7 +35,10 @@ public:
     // This function is asynchronous.
     Q_INVOKABLE void doExport();
 
+#if PL_BUILD_YDP02X
     bool exportFromQueryResult(uint64 query);
+#endif
+    bool consumeExportResult(void* result);
 
 signals:
 
@@ -59,7 +62,12 @@ private:
 
     bool mExporting = false;
 
-    int mExportProgress = 0;
+    int         mExportProgress  = 0;
+    uint64      mPendingExportId = 0;
+    QStringList mExportWords;
+    int         mExportIndex = 0;
+    json        mExportData;
+    void        exportNextWord();
 
     // QString _getMainTableName();
 };

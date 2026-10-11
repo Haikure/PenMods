@@ -5,6 +5,7 @@
  */
 
 #include "common/Event.h"
+#include "system/input/ScreenManager.h"
 
 #include <QQmlContext>
 
@@ -19,6 +20,7 @@ Event::Event() {
 } // namespace mod
 
 PEN_HOOK(void*, _ZN11YSystemBase17headSetInitStatusEv, void* self) {
+    mod::ScreenManager::getInstance().setSystemBase(reinterpret_cast<YSystemBase*>(self));
     static bool called = false;
     if (!called) {
         called = true;

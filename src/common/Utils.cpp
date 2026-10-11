@@ -8,6 +8,7 @@
 
 #include "base/YPointer.h"
 
+#include <QCoreApplication>
 #include <QUuid>
 #include <spdlog/spdlog.h>
 
@@ -57,10 +58,18 @@ void showToast(const std::string& content, const QColor& theme) {
     PEN_CALL(uint64, "_ZN7YGlobal9showToastERK7QStringRK6QColor", YGlobal*, const QString&, const QColor&)
     (YPointer<YGlobal>::getInstance(), QString::fromStdString(content), theme);
 #else
-    // 三代（YDP03X）toast 由 YBaseSignalAggregate::showToast(QString const&, QColor const&)
-    // 提供（mangled: _ZN21YBaseSignalAggregate9showToastERK7QStringRK6QColor），但其单例的 this
-    // 指针尚未解析，暂以日志代替；QML 层已直接使用 baseSignals.showToast()，C++ 侧 toast 为次要路径。
-    spdlog::info("[showToast] {}", content);
+    auto instance = PEN_CALL(QObject*, "_ZN10YSingletonI20YBaseSignalAggregateE8instanceEv");
+    if (QCoreApplication::instance() && instance) {
+        QMetaObject::invokeMethod(
+            instance(),
+            "showToast",
+            Qt::AutoConnection,
+            Q_ARG(QString, QString::fromStdString(content)),
+            Q_ARG(QColor, theme)
+        );
+    } else {
+        spdlog::info("[showToast] {}", content);
+    }
 #endif
 }
 
@@ -78,14 +87,12 @@ bool judgeIsLegalFileName(const QString& filename) {
 QString generateUUID() { return QUuid::createUuid().toString().remove("{").remove("}"); }
 
 double fuzzyLrcMatch(const QString& songName, const QString& lrcName) {
-    if (songName.isEmpty() || lrcName.isEmpty())
-        return 0.0;
-    if (songName == lrcName)
-        return 1.0;
+    if (songName.isEmpty() || lrcName.isEmpty()) return 0.0;
+    if (songName == lrcName) return 1.0;
     // 一方包含另一方
     if (songName.contains(lrcName) || lrcName.contains(songName)) {
-        double ratio = static_cast<double>(qMin(songName.length(), lrcName.length()))
-                       / qMax(songName.length(), lrcName.length());
+        double ratio =
+            static_cast<double>(qMin(songName.length(), lrcName.length())) / qMax(songName.length(), lrcName.length());
         return 0.85 * ratio;
     }
     // 去掉常见的修饰后缀后再比较
@@ -93,24 +100,19 @@ double fuzzyLrcMatch(const QString& songName, const QString& lrcName) {
         static const QStringList patterns = {"-", "—", "–", "(", "（", "[", "【"};
         for (const auto& p : patterns) {
             int idx = s.indexOf(p);
-            if (idx > 0)
-                s = s.left(idx).trimmed();
+            if (idx > 0) s = s.left(idx).trimmed();
         }
         return s;
     };
     QString a = stripSuffix(songName);
     QString b = stripSuffix(lrcName);
-    if (a == b)
-        return 0.9;
-    if (a.contains(b) || b.contains(a))
-        return 0.8;
+    if (a == b) return 0.9;
+    if (a.contains(b) || b.contains(a)) return 0.8;
     // 计算公共前缀长度
     int commonPrefix = 0;
     int minLen       = qMin(a.length(), b.length());
-    while (commonPrefix < minLen && a[commonPrefix] == b[commonPrefix])
-        ++commonPrefix;
-    if (commonPrefix > 0)
-        return 0.5 * static_cast<double>(commonPrefix) / qMax(a.length(), b.length());
+    while (commonPrefix < minLen && a[commonPrefix] == b[commonPrefix]) ++commonPrefix;
+    if (commonPrefix > 0) return 0.5 * static_cast<double>(commonPrefix) / qMax(a.length(), b.length());
     return 0.0;
 }
 

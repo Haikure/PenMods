@@ -1,7 +1,6 @@
 // The generated qrc header is model-specific. The target's on_config injects
 // PL_BUILD_<platform> (see xmake.lua), so this picks the right tree per build.
-// Note: YDP03X resource generation is a follow-up task; the YDP03X header is
-// expected to be produced by scripts/gen_qt_res.sh YDP03X before this target is built.
+// Generate with scripts/gen_qt_res.sh <qrc-source-dir> resource/models/<platform>.
 #if PL_BUILD_YDP02X
 #include "../models/YDP02X/qrc_qml.h"
 #elif PL_BUILD_YDP03X
@@ -9,13 +8,16 @@
 #endif
 
 extern "C" {
-const unsigned char* get_qt_resource_struct(){
-    return qt_resource_struct;
-};
-const unsigned char* get_qt_resource_data(){
-    return qt_resource_data;
-};
-const unsigned char* get_qt_resource_name(){
-    return qt_resource_name;
-};
+const char* get_penmods_build_platform() {
+#if PL_BUILD_YDP03X
+    return "PenMods.Platform=YDP03X";
+#elif PL_BUILD_YDP02X
+    return "PenMods.Platform=YDP02X";
+#else
+    return "PenMods.Platform=YDPG3";
+#endif
+}
+const unsigned char* get_qt_resource_struct() { return qt_resource_struct; };
+const unsigned char* get_qt_resource_data() { return qt_resource_data; };
+const unsigned char* get_qt_resource_name() { return qt_resource_name; };
 }

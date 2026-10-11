@@ -12,6 +12,7 @@
 #include <QFile>
 #include <QQmlContext>
 #include <QRandomGenerator>
+#include <QSaveFile>
 
 namespace mod {
 
@@ -45,41 +46,54 @@ bool ServiceManager::getAdbStatus() const {
     return readFileNoLast("/tmp/.usb_config").find("usb_adb_en") != std::string::npos;
 }
 
-bool ServiceManager::getSshStatus() const { return exec("ps | grep ssh").find("sshd") != std::string::npos; }
+bool ServiceManager::getSshStatus() const { return !exec("pidof sshd").empty(); }
+
+void ServiceManager::refresh() {
+    emit adbStatusChanged();
+    emit sshStatusChanged();
+}
 
 bool ServiceManager::startAdb(bool dontShowToast) {
-    PEN_CALL(uint64, "adb_onoff", char)(1);
+    auto toggle = PEN_CALL(void, "adb_onoff", char);
+    if (!toggle) return false;
+    toggle(1);
+    const bool success = getAdbStatus();
     if (!dontShowToast) {
-        showToast("ADB服务已启用");
+        showToast(success ? "ADB服务已启用" : "ADB服务启动失败");
     }
     emit adbStatusChanged();
-    return true;
+    return success;
 }
 bool ServiceManager::stopAdb(bool dontShowToast) {
-    PEN_CALL(uint64, "adb_onoff", char)(0);
+    auto toggle = PEN_CALL(void, "adb_onoff", char);
+    if (!toggle) return false;
+    toggle(0);
+    const bool success = !getAdbStatus();
     if (!dontShowToast) {
-        showToast("ADB服务已停用");
+        showToast(success ? "ADB服务已停用" : "ADB服务停止失败");
     }
     emit adbStatusChanged();
-    return true;
+    return success;
 }
 
 bool ServiceManager::startSsh(bool dontShowToast) {
     exec("sshd_sevice start");
+    const bool success = getSshStatus();
     if (!dontShowToast) {
-        showToast("SSH服务已启用");
+        showToast(success ? "SSH服务已启用" : "SSH服务启动失败");
     }
     emit sshStatusChanged();
-    return true;
+    return success;
 }
 
 bool ServiceManager::stopSsh(bool dontShowToast) {
     exec("sshd_sevice stop");
+    const bool success = !getSshStatus();
     if (!dontShowToast) {
-        showToast("SSH服务已停用");
+        showToast(success ? "SSH服务已停用" : "SSH服务停止失败");
     }
     emit sshStatusChanged();
-    return true;
+    return success;
 }
 
 bool ServiceManager::getAdbAutoRun() const { return mAdbAutoRun; }
@@ -94,6 +108,8 @@ void ServiceManager::setSkipAdbVerification(bool val) {
         mCfg["adb_skip_verification"] = val;
         if (val) {
             _passAdbVerification();
+        } else {
+            QFile::remove(QStringLiteral("/tmp/.adb_auth_verified"));
         }
         WRITE_CFG;
         emit skipAdbVerificationChanged();
@@ -119,6 +135,10 @@ void ServiceManager::setSshAutoRun(bool val) {
 }
 
 bool ServiceManager::setSshRootPasswd(const QString& val) {
+    if (val.isEmpty()) {
+        showToast("密码不能为空", "#E9900C");
+        return false;
+    }
     try {
         QFile shadow("/etc/shadow");
         if (!shadow.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -136,7 +156,7 @@ bool ServiceManager::setSshRootPasswd(const QString& val) {
                 auto  salt = _getRandomString(6);
                 char* crypted =
                     crypt(val.toLocal8Bit().data(), QString("$1$%1$").arg(QString::fromStdString(salt)).toUtf8());
-                if (crypted[0] == '*') {
+                if (!crypted || crypted[0] == '*') {
                     showToast("无法加密密码", "#E9900C");
                     return false;
                 }
@@ -147,12 +167,16 @@ bool ServiceManager::setSshRootPasswd(const QString& val) {
         }
         shadow.close();
         if (isModified) {
-            if (!shadow.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QSaveFile output(shadow.fileName());
+            if (!output.open(QIODevice::WriteOnly)) {
                 showToast("无法打开影子文件", "#E9900C");
                 return false;
             }
-            shadow.write(tmp.toUtf8());
-            shadow.close();
+            const auto data = tmp.toUtf8();
+            if (output.write(data) != data.size() || !output.commit()) {
+                showToast("保存密码失败", "#E9900C");
+                return false;
+            }
             showToast("密码重设成功");
             return true;
         }

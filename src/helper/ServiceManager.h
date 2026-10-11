@@ -21,6 +21,8 @@ class ServiceManager : public QObject, public Singleton<ServiceManager> {
     Q_PROPERTY(bool sshAutoRun READ getSshAutoRun WRITE setSshAutoRun NOTIFY sshAutoRunChanged);
 
 public:
+    Q_INVOKABLE void refresh();
+
     Q_INVOKABLE bool startAdb(bool dontShowToast = false);
 
     Q_INVOKABLE bool startSsh(bool dontShowToast = false);

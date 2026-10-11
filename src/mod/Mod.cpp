@@ -23,13 +23,26 @@
 #include <QProcessEnvironment>
 #include <QQmlContext>
 #include <QQuickView>
+#include <QTimer>
+#include <cstdlib>
+#include <unistd.h>
+
+extern "C" const char* get_penmods_build_platform() {
+#if PL_BUILD_YDP03X
+    return "PenMods.Platform=YDP03X";
+#elif PL_BUILD_YDP02X
+    return "PenMods.Platform=YDP02X";
+#else
+    return "PenMods.Platform=YDPG3";
+#endif
+}
 
 namespace mod {
 
 Mod::Mod() {
 
     const auto aiConfig = Config::getInstance().read("ai");
-    mVoiceChatEnabled  = aiConfig.value("speech_assistant", false);
+    mVoiceChatEnabled   = aiConfig.value("speech_assistant", false);
 
     connect(&Event::getInstance(), &Event::uiCompleted, this, &Mod::onUiCompleted);
     connect(&Event::getInstance(), &Event::beforeUiInitialization, [this](QQuickView& view, QQmlContext* context) {
@@ -41,10 +54,10 @@ Mod::Mod() {
             "PageIndex",
             "Not creatable as it is an enum type."
         );
-        
+
         // 将 WallpaperManager 注册到 QML 上下文
         context->setContextProperty("wallpaperManager", &WallpaperManager::getInstance());
-        
+
         // 发射属性变更信号，确保 QML 能正确获取初始值
         emit versionChanged();
         emit cachedSymCountChanged();
@@ -69,10 +82,10 @@ void Mod::changeSlot() { exec("update_engine --misc=other --reboot"); }
 
 void Mod::uninstall() {
     try {
-        QFile modLibrary(util::getModuleFileInfo().absoluteFilePath());
-        QFile mainProcess(util::getApplicationFileInfo().absoluteFilePath());
+        QFile   modLibrary(util::getModuleFileInfo().absoluteFilePath());
+        QFile   mainProcess(util::getApplicationFileInfo().absoluteFilePath());
         QString appDir = util::getApplicationFileInfo().absolutePath();
-        QFile mainProcessBak(appDir + "/YoudaoDictPen.original_bak");
+        QFile   mainProcessBak(appDir + "/YoudaoDictPen.original_bak");
         if (!mainProcessBak.exists()) {
             mainProcessBak.setFileName(appDir + "/YoudaoDictPen.bak");
         }
@@ -86,20 +99,24 @@ void Mod::uninstall() {
     }
 }
 
-void Mod::softReboot() { std::terminate(); }
+void Mod::softReboot() {
+    // Exit normally after pending UI/config writes; the guardian restarts us.
+    QTimer::singleShot(250, [] {
+        ::sync();
+        std::_Exit(EXIT_SUCCESS);
+    });
+}
 
 void Mod::reboot() { exec("sync && reboot"); }
 
 bool Mod::getVoiceChatEnabled() const { return mVoiceChatEnabled; }
 
 void Mod::setVoiceChatEnabled(bool enabled) {
-    if (mVoiceChatEnabled == enabled)
-        return;
+    if (mVoiceChatEnabled == enabled) return;
 
-    auto aiConfig = Config::getInstance().read("ai");
+    auto aiConfig                = Config::getInstance().read("ai");
     aiConfig["speech_assistant"] = enabled;
-    if (!Config::getInstance().write("ai", std::move(aiConfig)))
-        return;
+    if (!Config::getInstance().write("ai", std::move(aiConfig))) return;
     mVoiceChatEnabled = enabled;
     emit voiceChatEnabledChanged();
 }
@@ -107,8 +124,7 @@ void Mod::setVoiceChatEnabled(bool enabled) {
 QString Mod::getPendingVoiceChatText() const { return mPendingVoiceChatText; }
 
 void Mod::setPendingVoiceChatText(const QString& text) {
-    if (mPendingVoiceChatText == text)
-        return;
+    if (mPendingVoiceChatText == text) return;
     mPendingVoiceChatText = text;
     emit pendingVoiceChatTextChanged();
 }
@@ -134,7 +150,7 @@ void Mod::onUiCompleted() const {
 #else
         // YDP03X firmware reads both via vendor_storage; default to the CHN SKU.
         {"VENDOR_CUSTOM_ID_0E", "string", "OVERHEAD_D3_SKU_CHN_STD"},
-        {"VENDOR_COMPANY_ID",   "string", "COMPANY_HZ"},
+        {"VENDOR_COMPANY_ID", "string", "COMPANY_HZ"},
 #endif
     };
 
@@ -169,11 +185,11 @@ PEN_HOOK(bool, license_verify) { return true; }
 #include "common/Resource.h"
 
 #include "filemanager/FileManager.h"
+#include "filemanager/player/ExternalPlayer.h"
 #include "filemanager/player/MusicPlayer.h"
 #include "filemanager/player/VideoPlayer.h"
 #include "filemanager/reader/TextReader.h"
 #include "filemanager/viewer/ImageViewer.h"
-#include "filemanager/player/ExternalPlayer.h"
 
 #include "helper/AntiEmbs.h"
 #include "helper/DeveloperSettings.h"
@@ -182,6 +198,8 @@ PEN_HOOK(bool, license_verify) { return true; }
 
 #include "locker/Locker.h"
 
+#include "dict/CustomDict.h"
+#include "media/MediaSession.h"
 #include "mod/Updater.h"
 
 #include "recorder/AudioRecorder.h"
@@ -199,6 +217,7 @@ PEN_HOOK(bool, license_verify) { return true; }
 #include "tweaker/LoggerMonitor.h"
 #include "tweaker/QueryTweaks.h"
 #include "tweaker/TextBookHelper.h"
+#include "tweaker/TouchCalibration.h"
 #include "tweaker/WordBookTweaks.h"
 
 #include "hitokoto/Backend.h"
@@ -279,6 +298,8 @@ __attribute__((constructor)) static void BeforeMain() {
     INSTANCE(QueryTweaks);
     INSTANCE(TextBookHelper);
     INSTANCE(WordBookTweaks);
+    INSTANCE(TouchCalibration);
+    INSTANCE(CustomDict);
 
     // hitokoto
     INSTANCE(hitokoto::Hitokoto)
@@ -290,13 +311,15 @@ __attribute__((constructor)) static void BeforeMain() {
     INSTANCE(rime::Backend)
 
     // plugin
-    INSTANCE(PluginManager)
-    
+    INSTANCE(MediaSession)
+
     // wallpaper
     INSTANCE(WallpaperManager)
 
     // capture
     INSTANCE(capture::CameraCapture)
+
+    INSTANCE(PluginManager)
 
 #undef INSTANCE
 }

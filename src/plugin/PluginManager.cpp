@@ -2,6 +2,7 @@
 #include "PluginSDK.h"
 #include "QmlPluginWrapper.h"
 #include "common/Event.h"
+#include "media/MediaSession.h"
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -34,8 +35,7 @@ PluginManager::PluginManager() : Logger("PluginManager") {
 }
 
 PluginManager::~PluginManager() {
-    for (const QString& id : m_loadedLibraries.keys())
-        unloadSo(id);
+    for (const QString& id : m_loadedLibraries.keys()) unloadSo(id);
 }
 
 // ------------------------------------------------------------------
@@ -62,8 +62,24 @@ void PluginManager::attachEngineToLoadedPlugins() {
         typedef void (*AttachFunc)(QQmlEngine*);
         auto attach = reinterpret_cast<AttachFunc>(lib->resolve("attach_engine"));
         if (attach) {
+            // attach_engine also runs on startup, after loadSo has returned.
+            // Its crash must leave the same recovery marker as the init hooks.
+            QString flagPath;
+            for (const auto& plugin : m_plugins) {
+                if (plugin.id == it.key()) {
+                    flagPath = plugin.path + "/.loading";
+                    break;
+                }
+            }
+            QFile flag(flagPath);
+            if (flagPath.isEmpty() || !flag.open(QIODevice::WriteOnly)) {
+                spdlog::error("Cannot protect engine initialization for plugin {}", it.key().toStdString());
+                continue;
+            }
+            flag.close();
             spdlog::info("Attaching engine to plugin: {}", it.key().toStdString());
             attach(m_engine);
+            QFile::remove(flagPath);
         } else {
             spdlog::debug("Plugin {} does not export attach_engine(), skipped.", it.key().toStdString());
         }
@@ -227,11 +243,16 @@ bool PluginManager::loadSo(PluginInfo& info) {
             }
         }
 
-        // ---- 阶段 3: 注册到 map，再初始化 Hook API ----
-        QFile::remove(loadingFlagPath);
+        // ---- 阶段 3: 注册到 map，再初始化 Hook / Media API ----
         m_loadedLibraries.insert(info.id, lib);
         info.isLoaded = true;
         initializePluginHookAPI(info.id, lib);
+        initializePluginMediaAPI(info.id, lib);
+
+        // 到这里才算加载完：init_plugin_with_media_api 等回调里的崩溃也要能被崩溃自愈覆盖，
+        // 所以标记必须留到最后才删（否则插件会无限崩溃重启，把设备拖进 recovery）。
+        QFile::remove(loadingFlagPath);
+
         spdlog::info("Successfully loaded SO: {}", info.id.toStdString());
         return true;
     }
@@ -257,6 +278,9 @@ void PluginManager::setPluginPersistence(const PluginInfo& info, bool enable) {
 }
 
 void PluginManager::unloadSo(const QString& pluginId) {
+    // 插件卸载前先释放它持有的媒体会话，避免面板停留在一张没有内容的页面。
+    MediaSession::getInstance().releaseFor(pluginId);
+
     QLibrary* lib = m_loadedLibraries.take(pluginId);
     if (!lib) return;
     if (lib->isLoaded()) {
@@ -353,7 +377,7 @@ static void* querySymbolImpl(const char* symbolName) {
         spdlog::error("[PluginHookAPI] Symbol name is null");
         return nullptr;
     }
-    
+
     void* addr = SymDB::getInstance().query(symbolName);
     if (!addr) {
         spdlog::warn("[PluginHookAPI] Symbol not found: {}", symbolName);
@@ -365,11 +389,15 @@ static void* querySymbolImpl(const char* symbolName) {
 
 static int hookFunctionImpl(void* targetAddr, void* detourFunc, void** originalFunc) {
     if (!targetAddr || !detourFunc || !originalFunc) {
-        spdlog::error("[PluginHookAPI] Invalid parameters for hook (target: {}, detour: {}, original: {})",
-                     fmt::ptr(targetAddr), fmt::ptr(detourFunc), fmt::ptr(originalFunc));
+        spdlog::error(
+            "[PluginHookAPI] Invalid parameters for hook (target: {}, detour: {}, original: {})",
+            fmt::ptr(targetAddr),
+            fmt::ptr(detourFunc),
+            fmt::ptr(originalFunc)
+        );
         return -1;
     }
-    
+
     int result = DobbyHook(targetAddr, (dobby_dummy_func_t)detourFunc, (dobby_dummy_func_t*)originalFunc);
     if (result != 0) {
         spdlog::error("[PluginHookAPI] Failed to hook at {:#x}", reinterpret_cast<uint64_t>(targetAddr));
@@ -383,9 +411,7 @@ void PluginManager::initializePluginHookAPI(const QString& id, QLibrary* lib) {
     if (!lib || !lib->isLoaded()) return;
 
     typedef void (*InitPluginWithHookAPIFunc)(PluginHookAPI*);
-    auto initWithHookApi = reinterpret_cast<InitPluginWithHookAPIFunc>(
-        lib->resolve("init_plugin_with_hook_api")
-    );
+    auto initWithHookApi = reinterpret_cast<InitPluginWithHookAPIFunc>(lib->resolve("init_plugin_with_hook_api"));
 
     if (!initWithHookApi) {
         spdlog::debug("Plugin {} does not export init_plugin_with_hook_api(), skipped.", id.toStdString());
@@ -393,13 +419,32 @@ void PluginManager::initializePluginHookAPI(const QString& id, QLibrary* lib) {
     }
 
     // static: 插件持有指向此结构体的指针，其生命周期必须覆盖插件整个运行期
-    static PluginHookAPI hookApi = { &querySymbolImpl, &hookFunctionImpl };
+    static PluginHookAPI hookApi = {&querySymbolImpl, &hookFunctionImpl};
 
     try {
         initWithHookApi(&hookApi);
         spdlog::info("Hook API initialized for plugin: {}", id.toStdString());
     } catch (const std::exception& e) {
         spdlog::error("Exception in init_plugin_with_hook_api for plugin {}: {}", id.toStdString(), e.what());
+    }
+}
+
+void PluginManager::initializePluginMediaAPI(const QString& id, QLibrary* lib) {
+    if (!lib || !lib->isLoaded()) return;
+
+    typedef void (*InitPluginWithMediaAPIFunc)(PluginMediaAPI*);
+    auto initWithMediaApi = reinterpret_cast<InitPluginWithMediaAPIFunc>(lib->resolve("init_plugin_with_media_api"));
+
+    if (!initWithMediaApi) {
+        spdlog::debug("Plugin {} does not export init_plugin_with_media_api(), skipped.", id.toStdString());
+        return;
+    }
+
+    try {
+        initWithMediaApi(MediaSession::pluginApi());
+        spdlog::info("Media API initialized for plugin: {}", id.toStdString());
+    } catch (const std::exception& e) {
+        spdlog::error("Exception in init_plugin_with_media_api for plugin {}: {}", id.toStdString(), e.what());
     }
 }
 

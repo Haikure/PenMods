@@ -12,6 +12,8 @@
 
 #include <QDirIterator>
 #include <QFile>
+#include <QQmlContext>
+#include <QRegularExpression>
 
 #define TEXTBOOK_ROOT_DIR "/userdisk/resource/TextBook/"
 
@@ -38,15 +40,21 @@ TextBookHelper::TextBookHelper() : Logger("TextBook") {
     });
 
     connect(&Event::getInstance(), &Event::uiCompleted, this, &TextBookHelper::onUiCompleted);
+    connect(&Event::getInstance(), &Event::beforeUiInitialization, [this](QQuickView&, QQmlContext* context) {
+        context->setContextProperty("textBookHelper", this);
+    });
 }
+
+QString TextBookHelper::getRootPath() { return QStringLiteral(TEXTBOOK_ROOT_DIR); }
 
 void TextBookHelper::onUiCompleted() {
 
-    QDirIterator it(TEXTBOOK_ROOT_DIR);
+    mBookIds.clear();
+    QDirIterator it(TEXTBOOK_ROOT_DIR, QDir::Dirs | QDir::NoDotAndDotDot);
     while (it.hasNext()) {
         auto path = it.next();
-        auto id   = path.mid(it.path().length());
-        if (id.length() < 5) {
+        auto id   = QFileInfo(path).fileName();
+        if (!QRegularExpression(QStringLiteral("^[A-Za-z0-9_-]{5,128}$")).match(id).hasMatch()) {
             continue;
         }
         auto jsonPath = path + "/package/output.json";
@@ -63,8 +71,17 @@ void TextBookHelper::onUiCompleted() {
             PEN_CALL(void, "_ZN18YTextBookDbPrivate19addDownloadedBlocksERK7QString", uint64, QString)
             (dbPriv, zipPath);
 #else
-            // TODO(YDP03X): offline textbook auto-install (YTextBookDbPrivate) is
-            // not ported; the manual install path is left to the stock UI.
+            auto* database = YPointer<YTextBookDb>::getInstance();
+            if (!database) continue;
+            auto* data = *reinterpret_cast<void**>(reinterpret_cast<char*>(database) + 0x10);
+            auto  unzip =
+                PEN_CALL(void, "_ZN18YTextBookDbPrivate12unzipPackageERK7QStringS2_", void*, const QString&, const QString&);
+            auto add = PEN_CALL(void, "_ZN18YTextBookDbPrivate19addDownloadedBlocksERK7QString", void*, const QString&);
+            if (!data || !unzip || !add) continue;
+            // Empty destination selects the archive directory (0x475e44).
+            unzip(data, zipPath, QString());
+            if (!QFile::exists(jsonPath)) continue;
+            add(data, zipPath);
 #endif
         } else {
             // not uploaded.
@@ -72,6 +89,7 @@ void TextBookHelper::onUiCompleted() {
         }
         mBookIds.emplace_back(id);
     }
+    emit changed();
 }
 
 bool TextBookHelper::isInstalled(const QString& bookId) {
@@ -82,6 +100,7 @@ void TextBookHelper::remove(const QString& book) {
     for (auto it = mBookIds.begin(); it != mBookIds.end(); it++) {
         if (*it == book) {
             mBookIds.erase(it);
+            emit changed();
             break; // because, bookId is unique.
         }
     }
@@ -89,9 +108,6 @@ void TextBookHelper::remove(const QString& book) {
 
 } // namespace mod
 
-// YDP02X: the YTextBookEntity layout offsets read by getBookId are unverified on
-// YDP03X, so the unlock hooks (and the setDownloadState enum change) are left to
-// the stock firmware on YDP03X.
 #if PL_BUILD_YDP02X
 inline QString getBookId(uint64 entity) { return *(QString*)((uint64*)entity + 3); }
 
@@ -101,6 +117,12 @@ PEN_HOOK(uint64, _ZN15YTextBookEntity16setDownloadStateEN12YEnumWrapper14Downloa
     }
     return origin(self, a2);
 }
+#else
+inline QString getBookId(uint64 entity) { return PEN_CALL(QString, "_ZNK15YTextBookEntity6bookIdEv", uint64)(entity); }
+PEN_HOOK(void, _ZN15YTextBookEntity16setDownloadStateEN9YBaseEnum13DownloadStateE, uint64 self, int state) {
+    origin(self, mod::TextBookHelper::getInstance().isInstalled(getBookId(self)) ? 1 : state);
+}
+#endif
 
 PEN_HOOK(uint64, _ZN15YTextBookEntity11setIsBoughtEb, uint64 self, bool a2) {
     if (mod::TextBookHelper::getInstance().isInstalled(getBookId(self))) {
@@ -116,8 +138,9 @@ PEN_HOOK(uint64, _ZN15YTextBookEntity13setExpirationEx, uint64 self, int64 ts) {
     return origin(self, ts);
 }
 
-PEN_HOOK(uint64, _ZN15YTextBookEntity12setLocalFileERK7QString, uint64 self, QString a2) {
-    auto id = getBookId(self);
+PEN_HOOK(uint64, _ZN15YTextBookEntity12setLocalFileERK7QString, uint64 self, const QString& path) {
+    QString a2 = path;
+    auto    id = getBookId(self);
     if (mod::TextBookHelper::getInstance().isInstalled(id)) {
         a2 = TEXTBOOK_ROOT_DIR + id + "/package/package.zip";
     }
@@ -128,4 +151,3 @@ PEN_HOOK(uint64, _ZN16YTextBookManager6removeERK7QString, uint64 self, const QSt
     mod::TextBookHelper::getInstance().remove(book);
     return origin(self, book);
 }
-#endif

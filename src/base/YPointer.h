@@ -41,6 +41,8 @@ T* YPointer<T>::ptr_ = nullptr;
 
 // ----------- Youdao Classes -----------
 
+class YSystemBase;
+
 class YGlobal {
     char filler[0x20];
 };

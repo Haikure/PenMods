@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -87,26 +88,21 @@ class ChatBot : public QObject, public Singleton<ChatBot>, private Logger {
     Q_PROPERTY(bool capReasoning READ getCapReasoning NOTIFY activeModelCapabilitiesChanged)
     Q_PROPERTY(bool capImageGeneration READ getCapImageGeneration NOTIFY activeModelCapabilitiesChanged)
 
-    Q_PROPERTY(
-        QString proxyVisionModelId READ getProxyVisionModelId WRITE setProxyVisionModelId NOTIFY
-            proxyVisionSettingsChanged
-    )
-    Q_PROPERTY(
-        QString proxyVisionPrompt READ getProxyVisionPrompt WRITE setProxyVisionPrompt NOTIFY proxyVisionSettingsChanged
-    )
+    Q_PROPERTY(QString proxyVisionModelId READ getProxyVisionModelId WRITE setProxyVisionModelId NOTIFY
+                   proxyVisionSettingsChanged)
+    Q_PROPERTY(QString proxyVisionPrompt READ getProxyVisionPrompt WRITE setProxyVisionPrompt NOTIFY
+                   proxyVisionSettingsChanged)
 
     Q_PROPERTY(bool tavilyEnabled READ getTavilyEnabled WRITE setTavilyEnabled NOTIFY tavilyConfigChanged)
     Q_PROPERTY(bool tavilyConfigured READ getTavilyConfigured NOTIFY tavilyConfigChanged)
 
     Q_PROPERTY(bool shellToolEnabled READ getShellToolEnabled WRITE setShellToolEnabled NOTIFY shellToolConfigChanged)
 
-    Q_PROPERTY(
-        bool mathRenderEnabled READ getMathRenderEnabled WRITE setMathRenderEnabled NOTIFY mathRenderConfigChanged
-    )
+    Q_PROPERTY(bool mathRenderEnabled READ getMathRenderEnabled WRITE setMathRenderEnabled NOTIFY
+                   mathRenderConfigChanged)
     Q_PROPERTY(QString mathServerPath READ getMathServerPath WRITE setMathServerPath NOTIFY mathRenderConfigChanged)
-    Q_PROPERTY(
-        QString bubbleRenderMode READ getBubbleRenderMode WRITE setBubbleRenderMode NOTIFY bubbleRenderModeChanged
-    )
+    Q_PROPERTY(QString bubbleRenderMode READ getBubbleRenderMode WRITE setBubbleRenderMode NOTIFY
+                   bubbleRenderModeChanged)
 
 public:
     // 基础接口
@@ -117,7 +113,7 @@ public:
     Q_INVOKABLE void    sanitizeConfig();
     Q_INVOKABLE void    clearHistory();
     Q_INVOKABLE void    saveMessages();
-    Q_INVOKABLE QString markdownToHtml(const QString& markdown);
+    Q_INVOKABLE QString markdownToHtml(const QString& markdown, const QString& fontFamily = QString());
     Q_INVOKABLE void    parseMarkdownAsync(const QString& markdown, const QString& requestId);
     Q_INVOKABLE void    cancelMarkdownParse(const QString& requestId);
     Q_INVOKABLE void    truncateHistory(int index);
@@ -325,7 +321,11 @@ private:
     void       handleNetworkReply(QNetworkReply* reply, bool isStream);
     void       finishStream();
     void       emitContentChunk(const QString& content);
+    void       appendAnswerChunk(const QString& text);
+    void       appendReasoningChunk(const QString& text);
     void       flushEmbeddedContent();
+    void       reclassifyFinalAnswer();
+    QJsonArray buildApiMessagesFromHistory();
     void       recordApiUsage(const QJsonObject& usage);
     bool       usesResponsesApi() const;
     QJsonArray messagesToResponsesInput(const QJsonArray& messages) const;
@@ -400,6 +400,7 @@ private:
     bool    isCommandBlocked(const QString& command);
     void    executeShellCommand(const QString& toolCallId, const QString& command);
     void    cleanupShellExec(const QString& toolCallId);
+    void    abortPendingShellExecs(const QString& reason);
     QString truncateOutput(const QString& output, int maxBytes);
 
     // 数学公式渲染
@@ -420,6 +421,7 @@ private:
 
     void submitToolResultBatched(const QString& toolCallId, const QString& toolName, const QString& result);
     void tryFlushToolBatch();
+    void resolvePendingToolCalls(const QString& reason);
 
     void callVisionProxy(
         const QString&              message,

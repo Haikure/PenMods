@@ -86,6 +86,7 @@ Config::Config() : Logger("Config") {
         }},
         {"screen", {
             {"sleep_duration", 30},
+            {"shutdown_duration", 0},
             {"intel_sleep", false},
             {"intel_sleep_audio_lock", false}
         }},
@@ -125,7 +126,8 @@ Config::Config() : Logger("Config") {
             {"hide_paired_lyrics", false},
             {"show_hidden_files", false},
             {"pause_on_scan", false},
-            {"hide_floating_window", false}
+            {"hide_floating_window", false},
+            {"quick_panel_music_view", false}
         }},
         {"wallpaper", {
             {"mode", 0},
@@ -136,6 +138,12 @@ Config::Config() : Logger("Config") {
         }},
         {"capture", {
             {"enabled", false}
+        }},
+        {"keyboard", {
+            {"layout", "native"}
+        }},
+        {"updater", {
+            {"ydp03x_source", ""}
         }},
         {"ai", {
             {"auto_send_scan", true},

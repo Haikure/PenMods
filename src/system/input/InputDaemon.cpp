@@ -12,58 +12,96 @@
 #include "common/Event.h"
 #include "common/Utils.h"
 
+#include <QFile>
+#include <QFileInfo>
+#include <QRegularExpression>
+#include <QSaveFile>
+
 namespace mod {
 
 InputDaemon::InputDaemon() : Logger("InputDaemon") {
     connect(&Event::getInstance(), &Event::uiCompleted, this, &InputDaemon::onUiCompleted);
 }
 
-void InputDaemon::onUiCompleted() { reset(); }
+void InputDaemon::onUiCompleted() {
+    mReady = true;
+    reset();
+}
 
 bool InputDaemon::setScreenOff(uint32 sec) {
-    mScreenOff = sec;
+    const auto oldScreenOff = mScreenOff;
+    const auto oldBacklight = mBackLightDown;
+    mScreenOff              = sec;
     if (sec > 10) {
         mBackLightDown = sec - 10;
     } else {
         mBackLightDown = 0;
     }
-    _resetConfig();
-    return true;
+    if (_resetConfig()) return true;
+    mScreenOff     = oldScreenOff;
+    mBackLightDown = oldBacklight;
+    return false;
 }
 
 bool InputDaemon::setSystemSuspend(uint32 sec) {
-    if (mSystemSuspend <= mBackLightDown && mSystemSuspend != 0) {
+    if (sec <= mBackLightDown && sec != 0) {
         return false;
     }
-    mSystemSuspend = sec;
+    const auto oldSuspend = mSystemSuspend;
+    mSystemSuspend        = sec;
+    if (_resetConfig()) return true;
+    mSystemSuspend = oldSuspend;
+    return false;
+}
+
+void InputDaemon::setSystemSuspendOverride(bool enabled) {
+    if (mSystemSuspendOverride == enabled) {
+        return;
+    }
+    mSystemSuspendOverride = enabled;
     _resetConfig();
-    return true;
 }
 
 void InputDaemon::reset() {
-    setScreenOff(ScreenManager::getInstance().getAutoSleepDuration());
-    setSystemSuspend(BatteryInfo::getInstance().getAutoSuspendDuration());
+    mScreenOff     = ScreenManager::getInstance().getAutoSleepDuration();
+    mBackLightDown = mScreenOff > 10 ? mScreenOff - 10 : 0;
+    mSystemSuspend = BatteryInfo::getInstance().getAutoSuspendDuration();
+    if (!_resetConfig()) error("Unable to apply idle settings");
 }
 
-void InputDaemon::pause() { PEN_CALL(void*, "stop_auto_screen_off")(); }
+void InputDaemon::pause() {
+    mPaused   = true;
+    auto stop = PEN_CALL(void, "stop_auto_screen_off");
+    if (mReady && stop) stop();
+}
 
-void InputDaemon::resume() { PEN_CALL(void*, "start_auto_screen_off")(); }
+void InputDaemon::resume() {
+    mPaused    = false;
+    auto start = PEN_CALL(void, "start_auto_screen_off");
+    if (mReady && start) start();
+}
 
 bool InputDaemon::_resetConfig() {
-    auto          cfg = _getConfig();
-    std::ofstream ofile(cfg.mPath);
-    if (ofile.good()) {
-        exec("killall input-event-daemon");
-        ofile << QString::fromStdString(cfg.mContent)
-                     .replace("{backlight_down}", mBackLightDown ? QString::number(mBackLightDown) : "#")
-                     .replace("{screen_off}", mScreenOff ? QString::number(mScreenOff) : "#")
-                     .replace("{system_suspend}", mSystemSuspend ? QString::number(mSystemSuspend) : "#")
-                     .toStdString();
+    if (!mReady) return true;
+    auto cfg = _getConfig();
+    // The audio lock suppresses suspend at runtime without discarding the
+    // user's configured duration.
+    auto      suspend = mSystemSuspendOverride ? 0 : mSystemSuspend;
+    QSaveFile ofile(QString::fromStdString(cfg.mPath));
+    if (ofile.open(QIODevice::WriteOnly)) {
+        const QByteArray content =
+            QString::fromStdString(cfg.mContent)
+                .replace("{backlight_down}", mBackLightDown ? QString::number(mBackLightDown) : "#")
+                .replace("{screen_off}", mScreenOff ? QString::number(mScreenOff) : "#")
+                .replace("{system_suspend}", suspend ? QString::number(suspend) : "#")
+                .toUtf8();
+        if (ofile.write(content) != content.size() || !ofile.commit()) return false;
     } else {
         return false;
     }
-    ofile.close();
+    exec("killall input-event-daemon");
     exec("input-event-daemon");
+    if (mPaused) pause();
     return true;
 }
 
@@ -213,7 +251,33 @@ reset = screen_onoff on; sleep 1; killall -9 system_sleep_wakeup
 }
 
 InputDaemon::Config InputDaemon::_getConfig() {
-    auto pcba = exec("get_pcba_version");
+    // Preserve the real device's input paths and wake-up commands. Only rewrite
+    // idle durations; the two generations do not share all board templates.
+    QFileInfo active(QStringLiteral("/etc/input-event-daemon.conf"));
+    QFile     file(active.canonicalFilePath());
+    if (file.open(QIODevice::ReadOnly)) {
+        QStringList              lines = QString::fromUtf8(file.readAll()).split('\n');
+        const QRegularExpression duration(QStringLiteral("^\\s*(?:#|[0-9]+)s\\s*="));
+        bool                     backlight = false, screen = false, suspend = false;
+        for (auto& line : lines) {
+            if (!duration.match(line).hasMatch()) continue;
+            QString token;
+            if (line.contains("screen_onoff backlight_down")) {
+                token     = "{backlight_down}s =";
+                backlight = true;
+            } else if (line.contains("screen_onoff off")) {
+                token  = "{screen_off}s =";
+                screen = true;
+            } else if (line.contains("system_sleep_wakeup suspend")) {
+                token   = "{system_suspend}s =";
+                suspend = true;
+            }
+            if (!token.isEmpty()) line.replace(duration, token);
+        }
+        if (backlight && screen && suspend)
+            return {active.canonicalFilePath().toStdString(), lines.join('\n').toStdString()};
+    }
+    auto pcba = QString::fromStdString(exec("get_pcba_version")).trimmed().toStdString();
     if (pcba == "Dictpen2.0_V4") {
         return {"/etc/input-event-daemon_V4.conf", _getRawConfigure("V4")};
     }
