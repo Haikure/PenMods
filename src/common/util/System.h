@@ -14,4 +14,8 @@ extern QFileInfo getModuleFileInfo();
 
 extern QFileInfo getApplicationFileInfo();
 
+// Mutable data must stay outside immutable update generations.
+QString getStateDirectory();
+QString getUpdateDirectory();
+
 } // namespace mod::util

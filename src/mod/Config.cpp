@@ -12,13 +12,14 @@
 
 #include "Version.h"
 
+#include <QSaveFile>
 #include <set>
 
 namespace fs = std::filesystem;
 
 namespace mod {
 
-std::string get_config_path() { return (util::getModuleFileInfo().absolutePath() + "config.json").toStdString(); }
+std::string get_config_path() { return (util::getStateDirectory() + "config.json").toStdString(); }
 
 Config::Config() : Logger("Config") {
 
@@ -26,7 +27,11 @@ Config::Config() : Logger("Config") {
 
     mData = {
         {"version", VERSION_CONFIG},
-        {"updater", {{"manifest_url", ""}, {"github_proxy", ""}}},
+        {"updater", {
+            {"manifest_url", ""}, {"github_proxy", ""},
+            {"auto_check", true}, {"auto_download", false},
+            {"component_auto", {{"core", true}, {"player", false}, {"mathjax", false}, {"ppocr", false}}}
+        }},
         {"column_db", {
              {"patch", true}
         }},
@@ -254,9 +259,11 @@ bool Config::write(const std::string& name, json content, bool saveImmediately) 
     if (mData.find(name) == mData.end()) {
         return false;
     }
-    mData[name] = std::move(content);
-    if (saveImmediately) {
-        _save();
+    auto previous = std::move(mData[name]);
+    mData[name]   = std::move(content);
+    if (saveImmediately && !_save()) {
+        mData[name] = std::move(previous);
+        return false;
     }
     return true;
 }
@@ -430,13 +437,9 @@ bool Config::_upgrade_legacy_ai_defaults(json& data) {
 }
 
 bool Config::_save() {
-    std::ofstream ofile;
-    ofile.open(get_config_path());
-    if (ofile.good()) {
-        ofile << mData.dump(4);
-        return true;
-    }
-    return false;
+    const auto bytes = QByteArray::fromStdString(mData.dump(4));
+    QSaveFile  file(QString::fromStdString(get_config_path()));
+    return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit();
 }
 
 // 递归补充 target 中缺失的默认键，保留 target 中已有的值和多余的键

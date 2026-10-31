@@ -48,7 +48,7 @@ static QString hostLocalFile(void* manager) {
  * `onResetPlayer()`），之后再按播放键永远没反应 —— 就是“暂停后无法再次播放”。
  */
 static QString tempAudioLinkRoot() {
-    const auto moduleDir = util::getModuleFileInfo().absolutePath();
+    const auto moduleDir = util::getStateDirectory();
     if (!moduleDir.isEmpty()) {
         return moduleDir + "/audiolinks";
     }

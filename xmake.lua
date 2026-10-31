@@ -48,7 +48,7 @@ option_end()
 
 set_license('GPL-3.0-only')
 
-set_version('2.6.3')
+set_version('2.7.0')
 
 set_allowedarchs('linux|arm64-v8a')
 
@@ -201,6 +201,18 @@ target('PenMods')
             get_config('mode'),
             get_config('build-platform'))
         )
+    end)
+
+-- Independent launcher: deliberately has no Qt or PenMods runtime dependency.
+target('PenModsUpdate')
+    set_kind('binary')
+    set_basename('penmods-update')
+    add_files('tools/update/*.cpp')
+    add_packages('nlohmann_json')
+    on_config(function(target)
+        target:add('defines', 'PENMODS_VERSION="' .. target:version() .. '"')
+        target:add('defines', 'PENMODS_CHANNEL="' .. (get_config('target-channel') or 'dev') .. '"')
+        target:add('defines', 'PENMODS_MODEL="' .. (get_config('build-platform') or 'YDP02X') .. '"')
     end)
 
 -- Externalized resource library target

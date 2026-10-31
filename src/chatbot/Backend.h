@@ -257,7 +257,8 @@ public:
     void    setShellMode(const QString& mode);
 
     bool    getMathRenderEnabled() const { return m_mathRenderEnabled; }
-    QString getMathServerPath() const { return m_mathServerPath; }
+    QString getMathServerPath() const;
+    Q_INVOKABLE bool startManagedMathServer();
     QString getBubbleRenderMode() const { return m_bubbleRenderMode; }
     void    setMathRenderEnabled(bool v);
     void    setMathServerPath(const QString& path);
@@ -583,6 +584,7 @@ private:
     // 数学公式渲染
     bool    m_mathRenderEnabled = false;
     QString m_mathServerPath;
+    QProcess* m_managedMathProcess = nullptr;
     QString m_bubbleRenderMode = "full";
 
     void initMathRender();

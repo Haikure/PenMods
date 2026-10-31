@@ -2,7 +2,7 @@ name: Build PenMods
 
 on:
   # Only build when something the xmake build actually reads has changed. A docs-only commit
-  # (AGENTS.md, doc/*.md, README.md…) or a change under mathjax-server/ or tools/ does not need
+  # (AGENTS.md, doc/*.md, README.md…) or a change under mathjax-server/ or other tools/ does not need
   # a 9-minute cross build. Both lists are the build's real input set: add to them when a new
   # input appears, otherwise CI will silently skip that change. `workflow_dispatch` below is
   # always available for an on-demand build.
@@ -14,6 +14,7 @@ on:
       - 'resource/**'
       - 'external/**'
       - 'scripts/**'
+      - 'tools/update/**'
       - 'binary/xmake-git-*.pkg.tar.zst'
       - '.github/workflows/build.yaml'
   pull_request:
@@ -24,6 +25,7 @@ on:
       - 'resource/**'
       - 'external/**'
       - 'scripts/**'
+      - 'tools/update/**'
       - 'binary/xmake-git-*.pkg.tar.zst'
       - '.github/workflows/build.yaml'
   workflow_dispatch:

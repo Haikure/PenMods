@@ -29,6 +29,7 @@
 #include <QProcessEnvironment>
 #include <QQmlContext>
 #include <QQuickView>
+#include <QSaveFile>
 #include <QTimer>
 
 #include <unistd.h>
@@ -60,7 +61,7 @@ int readApplicationCrashCount() {
 Mod::Mod() {
 
     const auto aiConfig = Config::getInstance().read("ai");
-    mVoiceChatEnabled  = aiConfig.value("speech_assistant", false);
+    mVoiceChatEnabled   = aiConfig.value("speech_assistant", false);
 
     connect(&Event::getInstance(), &Event::uiCompleted, this, &Mod::onUiCompleted);
     connect(&Event::getInstance(), &Event::beforeUiInitialization, [this](QQuickView& view, QQmlContext* context) {
@@ -72,10 +73,10 @@ Mod::Mod() {
             "PageIndex",
             "Not creatable as it is an enum type."
         );
-        
+
         // 将 WallpaperManager 注册到 QML 上下文
         context->setContextProperty("wallpaperManager", &WallpaperManager::getInstance());
-        
+
         // 发射属性变更信号，确保 QML 能正确获取初始值
         emit versionChanged();
         emit cachedSymCountChanged();
@@ -100,14 +101,20 @@ void Mod::changeSlot() { exec("update_engine --misc=other --reboot"); }
 
 void Mod::uninstall() {
     try {
-        QFile modLibrary(util::getModuleFileInfo().absoluteFilePath());
-        QFile mainProcess(util::getApplicationFileInfo().absoluteFilePath());
+        QFile   modLibrary(util::getModuleFileInfo().absoluteFilePath());
+        QFile   mainProcess(util::getApplicationFileInfo().absoluteFilePath());
         QString appDir = util::getApplicationFileInfo().absolutePath();
-        QFile mainProcessBak(appDir + "/YoudaoDictPen.original_bak");
+        QFile   mainProcessBak(appDir + "/YoudaoDictPen.original_bak");
         if (!mainProcessBak.exists()) {
             mainProcessBak.setFileName(appDir + "/YoudaoDictPen.bak");
         }
         if (!mainProcessBak.exists()) throw std::runtime_error("无法还原主程序, 因为备份已丢失");
+        const auto updateRoot = util::getUpdateDirectory();
+        if (QDir(updateRoot).exists()) {
+            QSaveFile disabled(updateRoot + "/disabled");
+            if (!disabled.open(QIODevice::WriteOnly) || disabled.write("uninstalled\n") < 0 || !disabled.commit())
+                throw std::runtime_error("无法停用自动更新启动器");
+        }
         if (!mainProcess.remove() || !mainProcessBak.rename("YoudaoDictPen"))
             throw std::runtime_error("无法还原主程序");
         if (!modLibrary.remove()) throw std::runtime_error("无法删除 Mod 动态库，但主程序已还原");
@@ -191,13 +198,11 @@ void Mod::_onApplicationRestartWatchdog() {
 bool Mod::getVoiceChatEnabled() const { return mVoiceChatEnabled; }
 
 void Mod::setVoiceChatEnabled(bool enabled) {
-    if (mVoiceChatEnabled == enabled)
-        return;
+    if (mVoiceChatEnabled == enabled) return;
 
-    auto aiConfig = Config::getInstance().read("ai");
+    auto aiConfig                = Config::getInstance().read("ai");
     aiConfig["speech_assistant"] = enabled;
-    if (!Config::getInstance().write("ai", std::move(aiConfig)))
-        return;
+    if (!Config::getInstance().write("ai", std::move(aiConfig))) return;
     mVoiceChatEnabled = enabled;
     emit voiceChatEnabledChanged();
 }
@@ -205,8 +210,7 @@ void Mod::setVoiceChatEnabled(bool enabled) {
 QString Mod::getPendingVoiceChatText() const { return mPendingVoiceChatText; }
 
 void Mod::setPendingVoiceChatText(const QString& text) {
-    if (mPendingVoiceChatText == text)
-        return;
+    if (mPendingVoiceChatText == text) return;
     mPendingVoiceChatText = text;
     emit pendingVoiceChatTextChanged();
 }
@@ -265,11 +269,11 @@ PEN_HOOK(bool, license_verify) { return true; }
 #include "dict/CustomDict.h"
 
 #include "filemanager/FileManager.h"
+#include "filemanager/player/ExternalPlayer.h"
 #include "filemanager/player/MusicPlayer.h"
 #include "filemanager/player/VideoPlayer.h"
 #include "filemanager/reader/TextReader.h"
 #include "filemanager/viewer/ImageViewer.h"
-#include "filemanager/player/ExternalPlayer.h"
 
 #include "helper/AntiEmbs.h"
 #include "helper/DeveloperSettings.h"
@@ -311,6 +315,7 @@ PEN_HOOK(bool, license_verify) { return true; }
 
 #include "rime/Backend.h"
 
+#include "mod/UpdateCenter.h"
 #include "plugin/PluginManager.h"
 
 #include "capture/CameraCapture.h"
@@ -348,6 +353,7 @@ __attribute__((constructor)) static void BeforeMain() {
     INSTANCE(Config);
     INSTANCE(Mod);
     INSTANCE(Updater);
+    INSTANCE(UpdateCenter);
 
     // common
     INSTANCE(Downloader);
@@ -417,7 +423,7 @@ __attribute__((constructor)) static void BeforeMain() {
 
     // plugin
     INSTANCE(PluginManager)
-    
+
     // wallpaper
     INSTANCE(WallpaperManager)
 

@@ -34,6 +34,9 @@
 #include <QNetworkReply>
 #include <QPointer>
 #include <QProcess>
+#include <sys/prctl.h>
+#include <signal.h>
+#include <unistd.h>
 #include <QProcessEnvironment>
 #include <QQmlContext>
 #include <QRegularExpression>
@@ -517,7 +520,7 @@ void ChatBot::ensureCurrentSession() {
 QString ChatBot::sessionsFilePath() {
     if (m_sessionsPath.isEmpty()) {
         m_sessionsPath =
-            QString::fromStdString((mod::util::getModuleFileInfo().absolutePath() + "sessions.json").toStdString());
+            QString::fromStdString((mod::util::getStateDirectory() + "sessions.json").toStdString());
     }
     return m_sessionsPath;
 }
@@ -5875,6 +5878,44 @@ void ChatBot::abortAutomaticShellExecs(const QString& reason) {
 // 数学公式渲染
 // -----------------------------------------------------------------------
 
+namespace {
+QString managedMathServerPath() {
+    return mod::util::getUpdateDirectory() + "/active/mathjax/mathjax-server";
+}
+
+class ManagedMathProcess final : public QProcess {
+public:
+    using QProcess::QProcess;
+protected:
+    void setupChildProcess() override {
+        // A helper from the old generation must not survive an application restart.
+        const auto parent = getppid();
+        if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || parent == 1 || getppid() != parent) _exit(127);
+    }
+};
+} // namespace
+
+QString ChatBot::getMathServerPath() const {
+    if (!m_mathServerPath.isEmpty()) return m_mathServerPath;
+    const auto managed = managedMathServerPath();
+    return QFileInfo(managed).isExecutable() ? managed : QString();
+}
+
+bool ChatBot::startManagedMathServer() {
+    const auto path = managedMathServerPath();
+    if (getMathServerPath() != path) return false;
+    if (!m_mathRenderEnabled || !QFileInfo(path).isExecutable()) return true;
+    if (!m_managedMathProcess) {
+        m_managedMathProcess = new ManagedMathProcess(this);
+        m_managedMathProcess->setProcessChannelMode(QProcess::ForwardedChannels);
+        connect(m_managedMathProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+            warn("Managed formula renderer failed: {}", m_managedMathProcess->errorString().toStdString());
+        });
+    }
+    if (m_managedMathProcess->state() == QProcess::NotRunning) m_managedMathProcess->start(path, QStringList{});
+    return true;
+}
+
 void ChatBot::initMathRender() {
     json aiCfg = mod::Config::getInstance().read("ai");
     if (!aiCfg.contains("math_render") || !aiCfg["math_render"].is_object()) return;
@@ -5889,6 +5930,7 @@ void ChatBot::initMathRender() {
 void ChatBot::setMathRenderEnabled(bool v) {
     if (m_mathRenderEnabled == v) return;
     m_mathRenderEnabled = v;
+    if (!v && m_managedMathProcess) m_managedMathProcess->terminate();
 
     json aiCfg = mod::Config::getInstance().read("ai");
     if (aiCfg.is_null()) aiCfg = json::object();
@@ -5901,6 +5943,7 @@ void ChatBot::setMathRenderEnabled(bool v) {
 void ChatBot::setMathServerPath(const QString& path) {
     if (m_mathServerPath == path) return;
     m_mathServerPath = path;
+    if (m_managedMathProcess) m_managedMathProcess->terminate();
 
     json aiCfg = mod::Config::getInstance().read("ai");
     if (aiCfg.is_null()) aiCfg = json::object();

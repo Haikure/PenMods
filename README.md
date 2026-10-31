@@ -1,9 +1,11 @@
 # PenMods
 > 一般来说，你不需要手动下载 PenMods  
-> **全新安装** 👉[Installer](https://github.com/PenUniverse/Installer)  
+> **全新安装** 👉[Installer](https://github.com/PenUniverse/Installer)，安装后按[迁移步骤](doc/UPDATE_SYSTEM.md#手动安装迁移包)补齐更新启动器<br>
 > **从旧版更新** 👉系统自带的 OTA
 
 这里是 PenMods[^1] 的发布仓库。
+
+从 V2.7.0 起，**更多设置 → 软件更新**统一管理主程序、视频播放器、MathJax 和 PP-OCRv5。扩展可按需独立安装并选择自动更新；下载完成先暂存，下次启动应用时生效，启动验证失败会自动回退。旧版通过 OTA 安装一次迁移包后即可使用。仅手动替换两份动态库不会安装独立更新启动器，应使用该版本的完整 OTA 迁移包。详见[更新系统说明](doc/UPDATE_SYSTEM.md)。
 
 ## Building
 
@@ -34,6 +36,7 @@ xmake config --menu #（可选）xmake 图形化配置菜单，可以进一步�
 xmake build # 开始编译所有目标
 xmake build -v PenMods # 只编译 PenMods 库（启用 -v 选项输出详细编译过程信息）
 xmake build PenModsResources # 只编译 qrc 资源库（放在 libPenMods.so 同一目录）
+xmake build PenModsUpdate # 编译独立更新启动器 penmods-update
 xmake build QrcExporter # 编译 Qrc 资源导出模块（需要手动 patch 有道词典笔主程序并且在主程序重启后长按按键触发）
 
 # 其它
@@ -43,8 +46,8 @@ xmake clean # 清理编译产物
 ### CI
 
 `.github/workflows/build.yaml` 只在**构建输入**变化时运行：`xmake.lua`、`src/`、`resource/`、`external/`、
-`scripts/`、随仓库提供的 `binary/xmake-git-*.pkg.tar.zst`，以及 workflow 自身。只改文档（`README.md`、
-`AGENTS.md`、`doc/`）或改 `mathjax-server/`、`tools/` 不会触发它。需要时可以在 Actions 页面手动
+`scripts/`、`tools/update/`、随仓库提供的 `binary/xmake-git-*.pkg.tar.zst`，以及 workflow 自身。只改文档（`README.md`、
+`AGENTS.md`、`doc/`）或改 `mathjax-server/`、其它 `tools/` 内容不会触发它。需要时可以在 Actions 页面手动
 `workflow_dispatch` 触发；新增构建输入时记得把它加进 workflow 顶部的两个 `paths:` 列表，否则该改动会静默跳过 CI。
 
 ### Supported

@@ -8,6 +8,9 @@
 
 #include "common/Event.h"
 #include "common/Utils.h"
+#include "common/util/System.h"
+#include "mod/Mod.h"
+#include <cstdio>
 
 #include <QDir>
 #include <QFile>
@@ -72,12 +75,13 @@ void OcrBackend::setEnabled(bool value) {
         // 先写临时文件再 rename:正在运行(app 已把旧文件映射进来时)覆盖会被撕裂
         const QString temp = QString(SHADOW_SHIM) + ".new";
         QFile::remove(temp);
-        if (!QFile::copy(STAGE_SHIM, temp)) {
+        const auto managed = util::getUpdateDirectory() + "/active/ppocr/libyocr.so";
+        const bool staged  = QFile::exists(managed) ? QFile::link(managed, temp) : QFile::copy(STAGE_SHIM, temp);
+        if (!staged) {
             error("Cannot stage the OCR shim to {}", temp.toStdString());
             return;
         }
-        QFile::remove(SHADOW_SHIM);
-        if (!QFile::rename(temp, SHADOW_SHIM)) {
+        if (::rename(QFile::encodeName(temp).constData(), SHADOW_SHIM) != 0) {
             error("Cannot move the OCR shim into {}", SHADOW_SHIM);
             return;
         }
@@ -101,10 +105,6 @@ void OcrBackend::setAccuracyFirst(bool value) {
     emit stateChanged();
 }
 
-void OcrBackend::restartApplication() {
-    // 放开手再重启:先让 QML 把开关状态画出来,再由守护进程把 app 拉起来。
-    // 用子 shell 让 killall 脱离 popen 的生命周期,否则我们自己会先被 exec() 阻塞住。
-    exec("sync; (sleep 1; killall YoudaoDictPen) >/dev/null 2>&1 &");
-}
+void OcrBackend::restartApplication() { Mod::getInstance().restartApplication(); }
 
 } // namespace mod

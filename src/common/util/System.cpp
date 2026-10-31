@@ -17,10 +17,24 @@ QFileInfo getModuleFileInfo() {
     return QFileInfo(info.dli_fname);
 }
 
+QString getStateDirectory() {
+#ifdef PL_QEMU
+    return getModuleFileInfo().absolutePath();
+#else
+    return QStringLiteral("/userdata/PenMods");
+#endif
+}
+
+QString getUpdateDirectory() {
+    const auto fromLauncher = qEnvironmentVariable("PENMODS_UPDATE_ROOT");
+    return fromLauncher.isEmpty() ? QStringLiteral("/userdisk/PenMods/update-system") : fromLauncher;
+}
+
 QFileInfo getApplicationFileInfo() {
-    char path[4096];
-    if (readlink("/proc/self/exe", path, sizeof(path) - 1) == -1) return {};
-    return QFileInfo(path);
+    char       path[4096];
+    const auto length = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (length < 0) return {};
+    return QFileInfo(QString::fromLocal8Bit(path, static_cast<int>(length)));
 }
 
 } // namespace mod::util

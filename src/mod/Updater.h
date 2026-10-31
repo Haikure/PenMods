@@ -10,6 +10,7 @@
 
 #include "Version.h"
 
+#include <QDateTime>
 #include <QNetworkReply>
 #include <QPointer>
 #include <nlohmann/json.hpp>
@@ -70,14 +71,20 @@ public:
     bool             checkCancelled() const { return mCheckCancelled; }
     QString          cacheTimeText() const { return mCacheTime; }
     Q_INVOKABLE bool saveSources(QString manifest, QString proxy);
+    QStringList      sourcesFor(const QString& original) const { return _sources(original); }
+    QByteArray       cachedManifest() const { return mCachedManifest; }
+    QDateTime        manifestFetchedAt() const { return mCacheFetchedAt; }
+    json             targetPackage() const { return mLatestObject; }
 
 signals:
+    void manifestReady(QByteArray data);
     void settingsChanged();
     void sourceStatusChanged();
 
 private:
     QByteArray              mCachedManifest;
     QString                 mCacheTime;
+    QDateTime               mCacheFetchedAt;
     bool                    mCacheAttempted = false;
     bool                    mCheckCancelled = false;
     quint64                 mRequestSeq     = 0;
@@ -117,10 +124,6 @@ private:
         uint32       mDownloadProgress = 0;
         uint32       mInstallProgress  = 0;
     } mInfo;
-
-    std::string _calcFileMd5(const QString&);
-
-    void _unzip(QString, QString);
 
     void _cleanupTemp();
 

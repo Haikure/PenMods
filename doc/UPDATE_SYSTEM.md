@@ -1,0 +1,115 @@
+# PenMods 更新中心
+
+更新中心将主程序和可选扩展作为独立组件管理。下载首先校验大小和哈希，再交给独立原生启动器暂存。暂存产生待激活 generation；当前进程不切换版本，启动器在下次启动应用时激活。
+
+## 组件与发布清单
+
+组件 ID 固定为 `core`、`player`、`mathjax` 和 `ppocr`。清单继续保留旧 `status:200` 和 `versions`，扩展信息加入可选 `components` 数组：
+
+```json
+{
+  "status": 200,
+  "versions": ["existing legacy entries remain here"],
+  "components": [{
+    "id": "player",
+    "name": "视频播放器",
+    "versions": [{
+      "version": [1, 2, 0],
+      "size": 123,
+      "unpacked_size": 456,
+      "sha256": "64 lowercase hex characters",
+      "download": "https://example/player.zip",
+      "model": "YDP02X",
+      "arch": "aarch64",
+      "channel": "stable",
+      "requires": {"core": {"min": "2.6.3", "max_exclusive": "3.0.0"}}
+    }]
+  }]
+}
+```
+
+以上是结构示例，发布时必须填写真实大小、哈希和版本对象。扩展与新组件目录必须有 SHA-256；旧 core 的 MD5 信息仍可读取。core 目标版本遵守旧 Updater 的 `next` 升级路径。新 core 包必须声明 `health_protocol:1`，并同时包含主库和资源库。缺少心跳协议的旧包仍显示版本信息，但不能进入新启动器的候选试运行。
+
+## 制作数据包
+
+```sh
+python3 tools/package_update.py --component player --version 1.2.0 --source build/player-package --output build/player.zip --descriptor build/player.json --download https://example/player.zip --model YDP02X --channel stable
+```
+
+[打包脚本](../tools/package_update.py)生成固定时间戳、稳定顺序和压缩方式的 ZIP。标准输出是可放入 `components[].versions[]` 的 JSON（version 为数组），`--descriptor` 保存可直接传给 native `stage` 的 JSON（version 为字符串）。正常数据包只复制规定的 payload，不打包安装脚本。core 元数据也输出 MD5，以兼容旧 `versions` 校验。`size` 与哈希对应完整 ZIP，`unpacked_size` 对应文件解压总大小。输入不能含软链接或特殊文件；库和程序必须是 little-endian aarch64 ELF。单文件最多 192 MiB，ZIP 最多 256 MiB，解压总量最多 512 MiB。
+
+| ID | ZIP 内容 |
+| --- | --- |
+| core | 根目录 `libPenMods.so`、`libPenModsResources.so` |
+| player | `FFmpegPlayer/libffmpegplayerplugin.so`、`FFmpegPlayer/qmldir` |
+| mathjax | 根目录 `mathjax-server`，固定可执行权限 |
+| ppocr | 根目录 `libyocr.so`，必须含 `models/PP_OCRv5_mobile_rec.ncnn.param` 和 `.ncnn.bin`；附加模型也必须成对 |
+
+要求写入单独 JSON 文件，再以 `--requires FILE` 传入。model、arch、channel 与组件依赖由 native helper 再次验证；只有兼容组合才能成为待激活 generation。发布 URL 必须使用 HTTPS；版本化 CDN 路径发布后不要覆盖。
+
+## 旧设备首次迁移
+
+旧客户端尚无独立启动器时，可由同一发布工具生成一次性的兼容外包，之后使用正常数据包。正常 core ZIP 与兼容外包必须使用不同文件名和发布 URL：
+
+```sh
+python3 tools/package_update.py --component core --version 2.7.0 --source build/core-package --output build/core.zip --descriptor build/core.json --download https://example/core.zip --model YDP02X --channel dev --bootstrap-helper build/penmods-update --bootstrap-installer tools/update/install-launcher.sh --bootstrap-output build/bootstrap.zip --bootstrap-download https://example/bootstrap.zip --bootstrap-descriptor build/bootstrap.json
+```
+
+兼容外包包含 `_do_update.sh`、`penmods-update`、`install-launcher.sh`、`core-package.zip`、`core-descriptor.json`。迁移脚本依次：原子安装 helper；以 `init --snapshot-only` 快照旧程序（版本记为未知）；校验并暂存内包；运行严格识别原启动命令的入口安装脚本；最后创建新成功标记。快照或 stage 失败时不修改启动入口。入口安装失败时 pending 仍未激活，原程序路径不变。迁移不会覆盖已映射的主库或资源库。
+
+同一清单中，旧 `versions` 对应该外包的大小、MD5 和 URL；`components` 中 `id:"core"` 的对应版本则指向正常内包。新中心选择相同 Updater 目标版本的 core 组件描述，不执行兼容外包中的脚本。发布者必须保留旧设备当前版本和 `next` 路径；核心新库必须真实实现健康协议。
+
+迁移脚本支持 `PENMODS_BOOTSTRAP_PREFIX` 测试根目录，仅用于主机测试；正式设备不设置。正常包和兼容外包生成工具不进行网络发布。发布清单必须同时包含独立组件目录；未提供扩展元数据的自定义清单仍显示“暂无可用版本”。
+
+## 手动安装迁移包
+
+首次通过外部 Installer 安装、或曾只替换动态库的设备，需要额外运行完整 OTA 包一次来安装独立更新启动器。新版页面提示“更新启动器尚未安装”时也使用此方法；单独下载主库和资源库无法补齐它。旧版客户端正常通过软件更新安装则会自动完成迁移。
+
+从[对应 Release](https://github.com/Lyrecoul/PenMods/releases/tag/V2.7.0)下载 `update_v2.7.0.zip`，连接 ADB 后执行：
+
+```sh
+adb shell "mkdir -p /userdisk/PenMods/install-2.7.0"
+adb push update_v2.7.0.zip /userdisk/PenMods/install-2.7.0/
+adb shell "cd /userdisk/PenMods/install-2.7.0 && unzip -o update_v2.7.0.zip && sh _do_update.sh"
+```
+
+命令成功后更新只处于待生效状态，回到软件更新页面刷新并重启应用即可；缺少新版页面的旧客户端可通过正常关机开机生效。不要直接覆盖正在运行的动态库。路径和启动脚本不匹配时迁移会报错并停止，不应手动伪造成功标记。
+
+卸载后重装时，迁移先以 `init --reinstall-snapshot` 将当前安装的库重新快照为基线，清空旧 pending/trial，但保持实时别名与停用标记；只有新包暂存和启动入口安装均成功后才通过 `enable` 重新启用事务。失败时保持旁路启动。
+
+## 启动器与事务
+
+启动器路径为 `/userdata/PenMods/penmods-update`，存储根目录默认 `/userdisk/PenMods/update-system`。所有命令支持 `--root ROOT`；主机测试还可用 `--prefix PREFIX`。
+
+- `status` 输出 JSON：`installed`、`active`、`pending`、`trial`、`components`、`pending_components` 与 `last_error`。组件信息为 `{version,path}`。
+- `stage DESCRIPTOR_JSON ARCHIVE_ZIP` 再次校验哈希和 ZIP，安全解压到新目录，合并到已有 pending generation。不会激活。
+- `cancel` 只删除待激活事务，不能取消已开始的试运行。
+- `run -- APP ARG...` 导入初始版本，迁移兼容别名，并在启动前选择 generation。
+
+active 指针同时选择主库、资源库与可选组件，避免跨版本混用；旧 generation 保留供回滚使用。下载和解压不会覆盖任何已映射的库。ZIP 先检查中央目录，拒绝路径穿越、软链接、设备、重复、加密、越界文件；不执行包内脚本。
+
+启动器向子进程提供 `PENMODS_UPDATE_ROOT`、`PENMODS_UPDATE_GENERATION` 和 `PENMODS_UPDATE_TOKEN`。UI 完成后，UpdateCenter 每两秒通过 QSaveFile 原子写入 `health/TOKEN.json`：
+
+```json
+{"generation":"generation-id","token":"random-token","pid":1234,"sequence":7}
+```
+
+启动器绑定实际子进程 PID 和随机 token；递增心跳持续 20 秒才确认。120 秒内未达到条件或进程退出时回滚到上次已确认版本。候选无法加载本身也由独立进程监控，不依赖候选库执行回滚。确认完成后客户端发现 trial journal 已清除便停止心跳，避免持续写入闪存。userdisk 不可用时，启动器可恢复 userdata 下保留的基线主库和资源库别名作为应急启动路径。
+
+## 页面与自动下载
+
+`updateCenter.components` 始终提供四个组件，字段为 `id/name/installedVersion/availableVersion/note/sizeText/stateText/progress/available/installed/pending/busy/autoUpdate/canDownload`，另外有供诊断的 `state/error`。页面按 `canDownload` 决定安装或更新是否可操作。
+
+`downloadComponent(id)` 完成下载、校验和暂存。各组件请求按队列串行执行，每项保存请求时的清单快照。取消下载会取消活动网络请求和后续队列，正在执行的 native 暂存则完成后退出。`cancelPending()` 丢弃待激活版本，`restartNow()` 重启应用以激活。清单源与代理继续使用原 Updater；`refresh()` 仅刷新本地状态，不重复发起网络清单检查。
+
+`updater.auto_check` 默认 true；UI 完成 30 秒后开始调度，24 小时内的已接受网络清单可复用，过期会重新拉取。周期定时器持续检查到期时间；网络失败采用 5、10、20、40、60 分钟上限退避，恢复网络时也检查是否到期。缓存加载不重置原获取时间。`auto_download` 默认 false。`component_auto` 默认只为 core 启用。自动下载只更新已安装、明确选择的组件，不会自行安装未装扩展，也不下载只有 MD5 的旧 core 包。每个 SHA-256 在一次进程生命周期内最多自动尝试一次，失败后保留手动重试。自动下载只暂存，不主动重启。
+
+导入的旧扩展版本显示 `0.0.0`（未知），不能当作已是最新版。安装和启用分别处理：OCR 开关、MathJax 用户自定义路径等现有设置保持各自语义。已有 MathJax 自定义程序不会自动搬入受管目录。
+
+## 验证范围
+
+Native helper 的主机故障测试覆盖事务、ZIP 拒绝、崩溃、健康确认、损坏日志、首次启动救援及启动入口安装。[打包回归测试](../tools/test_package_update.py)使用临时目录覆盖四种布局、确定性、哈希、非法输入及旧客户端迁移成败路径。运行 `python3 -B tools/test_package_update.py`；设置 `PENMODS_UPDATE_TEST_HELPER` 为已构建的 host helper 路径后，共运行 9 项测试，包含真实 native 首次快照、暂存和卸载后重装集成。
+
+2026-10-31 在 YDP02X、Qt 5.15.2、glibc 2.27 上完成启动器、主库、资源库交叉构建和实机迁移验证：安装迁移包后旧进程和两库哈希保持不变；重启后激活候选，UI 心跳完成确认；已安装 player/OCR 保持原状态，配置与聊天记录沿用原路径。实机隔离根目录另外验证了候选退出 42 后自动回退，以及递增心跳确认；没有故意让真实字典应用崩溃。已在设备进入更新中心、播放器详情、更新设置和重启确认页。播放器播放、OCR 扫描和 MathJax 渲染功能本身仍应按各组件发布内容另做冒烟测试。
+
+目前使用 HTTPS 与大小/SHA-256 校验保证下载传输和文件完整性，尚未配置发行公钥和签名验证；不能将清单中的哈希等同于发布者签名。

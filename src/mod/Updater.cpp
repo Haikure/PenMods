@@ -12,6 +12,7 @@
 #include "common/Utils.h"
 #include "common/util/System.h"
 #include "mod/Config.h"
+#include "mod/UpdateCenter.h"
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -25,12 +26,14 @@
 #include <QQmlContext>
 #include <QSaveFile>
 #include <QStorageInfo>
+#include <tuple>
 
-#define UH_TEMP_PATH    "/tmp/modupdate/"
-#define UH_TEMP_DIRNAME "modupdate"
+#define UH_TEMP_PATH "/tmp/modupdate/"
 
 #if PL_BUILD_YDP02X
 #define UH_MAIN_URL "https://cdn.jsdelivr.net/gh/lyrecoul/penmods-ota@main/updates.json"
+#else
+#define UH_MAIN_URL ""
 #endif
 
 namespace mod {
@@ -46,7 +49,6 @@ Updater::Updater() : Logger("Updater") {
 }
 
 QString Version::toString() const {
-    spdlog::warn("1.1");
     return QString("%1.%2.%3").arg(QString::number(mMajor), QString::number(mMinor), QString::number(mRevision));
 }
 
@@ -56,11 +58,13 @@ bool Version::operator==(const Version b) const {
     return mMajor == b.mMajor && mMinor == b.mMinor && mRevision == b.mRevision;
 }
 
-bool Version::operator>(const Version b) const { return toNumber() > b.toNumber(); }
+bool Version::operator>(const Version b) const {
+    return std::tie(mMajor, mMinor, mRevision) > std::tie(b.mMajor, b.mMinor, b.mRevision);
+}
 
-bool Version::operator<(const Version b) const { return toNumber() < b.toNumber(); }
+bool Version::operator<(const Version b) const { return b > *this; }
 
-QString Updater::_cachePath() const { return util::getModuleFileInfo().absoluteDir().filePath("ota-manifest.json"); }
+QString Updater::_cachePath() const { return QDir(util::getStateDirectory()).filePath("ota-manifest.json"); }
 
 bool Updater::_restoreManifest() { return !mCachedManifest.isEmpty() && _parseManifest(mCachedManifest); }
 
@@ -75,9 +79,11 @@ bool Updater::_loadManifestCache() {
         if (data.size() > 1024 * 1024 || !_parseManifest(data)) return false;
         mCachedManifest  = data;
         mCacheTime       = time.toString("yyyy-MM-dd HH:mm");
+        mCacheFetchedAt  = time;
         mSourceConnected = false;
         mSourceStatus    = "使用已缓存的更新清单";
         emit sourceStatusChanged();
+        emit manifestReady(data);
         return true;
     } catch (const std::exception&) {
         return false;
@@ -88,6 +94,7 @@ void Updater::_saveManifestCache(const QByteArray& data) {
     mCachedManifest  = data;
     const auto now   = QDateTime::currentDateTime();
     mCacheTime       = now.toString("yyyy-MM-dd HH:mm");
+    mCacheFetchedAt  = now;
     const json cache = {
         {"source",   manifestUrl().toStdString()    },
         {"saved_at", now.toSecsSinceEpoch()         },
@@ -97,6 +104,7 @@ void Updater::_saveManifestCache(const QByteArray& data) {
     QSaveFile  file(_cachePath());
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         warn("Cannot persist OTA manifest cache; keeping the in-memory copy");
+    emit manifestReady(data);
 }
 
 void Updater::ensureChecked() {
@@ -226,16 +234,7 @@ bool Updater::_parseManifest(const QByteArray& data) {
 
 Updater::UpdateInfo& Updater::getInfo() { return mInfo; }
 
-void Updater::download() {
-    if (mBusy || (mInfo.mOtaStatus != HAS_NEW_VERSION && mInfo.mOtaStatus != DOWNLOAD_FAILED)) return;
-    mDownloading = true;
-    ++mRequestSeq;
-    mBusy = true;
-    _setDownloadProgress(0);
-    mCandidates = _sources(QString::fromStdString(mLatestObject["download"]));
-    _setOtaStatus(DOWNLOADING);
-    _requestNext();
-}
+void Updater::download() { UpdateCenter::getInstance().downloadComponent("core"); }
 
 namespace {
 const QStringList& otaProxies() {
@@ -258,7 +257,7 @@ QString Updater::githubProxy() const {
 }
 
 bool Updater::saveSources(QString manifest, QString proxy) {
-    if (mBusy) return false;
+    if (mBusy || UpdateCenter::getInstance().busy()) return false;
     manifest = manifest.trimmed();
     proxy    = proxy.trimmed();
     if ((!manifest.isEmpty() && !validSource(manifest))
@@ -266,17 +265,15 @@ bool Updater::saveSources(QString manifest, QString proxy) {
         return false;
     if (!proxy.isEmpty() && !proxy.endsWith('/')) proxy += '/';
     const bool sourceChanged = manifest != manifestUrl();
-    Config::getInstance().write(
-        "updater",
-        {
-            {"manifest_url", manifest.toStdString()},
-            {"github_proxy", proxy.toStdString()   }
-    }
-    );
+    auto       config        = Config::getInstance().read("updater");
+    config["manifest_url"]   = manifest.toStdString();
+    config["github_proxy"]   = proxy.toStdString();
+    if (!Config::getInstance().write("updater", std::move(config))) return false;
     mPreferredProxy.clear();
     if (sourceChanged) {
         mCachedManifest.clear();
         mCacheTime.clear();
+        mCacheFetchedAt = {};
         mCacheAttempted = false;
         mLatestObject   = json();
     }
@@ -414,34 +411,7 @@ void Updater::_requestNext() {
     if (*localError) reply->abort();
 }
 
-void Updater::install() {
-    if (mBusy
-        || (mInfo.mOtaStatus != DOWNLOAD_FINISHED && mInfo.mOtaStatus != INSTALL_FAILED
-            && mInfo.mOtaStatus != ERROR_MD5_CHECK))
-        return;
-
-    _setOtaStatus(MD5_CHECKING);
-    if (_calcFileMd5(UH_TEMP_PATH "download.temp")
-        != QString::fromStdString(mLatestObject["md5"]).toLower().toStdString()) {
-        _setOtaStatus(ERROR_MD5_CHECK);
-    } else {
-        _unzip(UH_TEMP_PATH "download.temp", UH_TEMP_PATH);
-        if (!QFile(UH_TEMP_PATH "_do_update.sh").exists()) {
-            _setOtaStatus(ERROR_MD5_CHECK);
-        } else {
-            _setOtaStatus(MD5_CHECK_SUCCESSFULLY);
-            _setOtaStatus(INSTALLING);
-            exec(QString("chmod +x \"%1\"").arg(UH_TEMP_PATH "_do_update.sh"));
-            exec(QString("cd \"%1\" && bash _do_update.sh").arg(UH_TEMP_PATH));
-            _setInstallProgress(100);
-            if (QFile(UH_TEMP_PATH "INSTALL_SUCCESSFULLY").exists()) {
-                _setOtaStatus(INSTALL_SUCCESSFULLY);
-            } else {
-                _setOtaStatus(INSTALL_FAILED);
-            }
-        }
-    }
-}
+void Updater::install() { UpdateCenter::getInstance().restartNow(); }
 
 void Updater::onUiCompleted() {
 
@@ -450,17 +420,9 @@ void Updater::onUiCompleted() {
     _setCurrentVersion(mSelfVersion.toString());
 }
 
-std::string Updater::_calcFileMd5(const QString& path) {
-    return exec(QString(R"(md5sum -b "%1" | cut -d" " -f1)").arg(path));
-}
-
-void Updater::_unzip(QString zipPath, QString toWhere) {
-    exec(QString(R"(unzip -q -o "%1" -d "%2")").arg(zipPath, toWhere));
-}
-
 void Updater::_cleanupTemp() {
-    util::getModuleFileInfo().absoluteDir().rmdir(UH_TEMP_DIRNAME);
     QDir(UH_TEMP_PATH).mkpath(".");
+    QFile::remove(QStringLiteral(UH_TEMP_PATH "version_list.temp"));
 }
 
 void Updater::_setCurrentVersion(QString verstr) {
